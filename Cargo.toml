@@ -1,0 +1,19 @@
+[package]
+name = "hypred-greeter"
+version = "0.1.0"
+edition = "2021"
+description = "A greetd greeter where the layout is yours: TOML widget tree + GTK4 CSS, every widget addressable"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/edraven/hypred-greeter"
+
+[dependencies]
+gtk4 = { version = "0.11", features = ["v4_12"] }
+greetd_ipc = { version = "0.10", features = ["sync-codec"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+shlex = "2"
+async-channel = "2"
+
+[profile.release]
+lto = "thin"
+strip = true
