@@ -2,6 +2,7 @@
 //! GTK skips bad rules, we log them; a missing file falls back to the
 //! embedded default so the greeter always renders something styled.
 
+pub mod bus;
 pub mod ctx;
 
 use gtk4 as gtk;

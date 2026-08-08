@@ -61,7 +61,8 @@ fn main() {
         problems.extend(layout.problems);
 
         let registry = widgets::Registry::builtin();
-        let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, args.demo);
+        let bus = Rc::new(ui::bus::Bus::default());
+        let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, bus.clone(), args.demo);
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
 

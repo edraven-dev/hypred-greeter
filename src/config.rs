@@ -52,6 +52,16 @@ pub enum Fit {
 }
 
 impl Fit {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "cover" => Fit::Cover,
+            "contain" => Fit::Contain,
+            "fill" => Fit::Fill,
+            "scale-down" => Fit::ScaleDown,
+            _ => return None,
+        })
+    }
+
     pub fn to_gtk(self) -> gtk4::ContentFit {
         match self {
             Fit::Cover => gtk4::ContentFit::Cover,

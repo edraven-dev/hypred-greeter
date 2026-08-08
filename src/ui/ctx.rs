@@ -3,14 +3,18 @@
 
 use gtk4 as gtk;
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::config::Config;
 use crate::layout::{build, Node};
+use crate::ui::bus::Bus;
 use crate::widgets::Registry;
 
 pub struct BuildCtx<'a> {
     pub config: &'a Config,
     pub registry: &'a Registry,
+    /// Widgets clone this into closures to hear auth/system events.
+    pub bus: Rc<Bus>,
     /// True in --demo: widgets with side effects (power, session start)
     /// must print instead of executing.
     pub demo: bool,
@@ -18,8 +22,8 @@ pub struct BuildCtx<'a> {
 }
 
 impl<'a> BuildCtx<'a> {
-    pub fn new(config: &'a Config, registry: &'a Registry, demo: bool) -> Self {
-        Self { config, registry, demo, problems: RefCell::new(Vec::new()) }
+    pub fn new(config: &'a Config, registry: &'a Registry, bus: Rc<Bus>, demo: bool) -> Self {
+        Self { config, registry, bus, demo, problems: RefCell::new(Vec::new()) }
     }
 
     /// Containers recurse through this so every node gets the same

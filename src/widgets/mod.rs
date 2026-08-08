@@ -4,8 +4,11 @@
 //! future dynamically-loaded addon (`libloading` + `register(&mut Registry)`)
 //! needs no trait changes.
 
+mod background;
+mod clock;
 mod containers;
 mod label;
+mod message;
 
 use gtk4 as gtk;
 use std::collections::HashMap;
@@ -62,6 +65,9 @@ impl Registry {
         registry.register(Box::new(containers::OverlayDef));
         registry.register(Box::new(containers::GridDef));
         registry.register(Box::new(label::LabelDef));
+        registry.register(Box::new(background::BackgroundDef));
+        registry.register(Box::new(clock::ClockDef));
+        registry.register(Box::new(message::MessageDef));
         registry
     }
 
