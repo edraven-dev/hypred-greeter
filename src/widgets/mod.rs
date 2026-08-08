@@ -9,6 +9,8 @@ mod clock;
 mod containers;
 mod label;
 mod message;
+mod password;
+mod username;
 
 use gtk4 as gtk;
 use std::collections::HashMap;
@@ -68,6 +70,8 @@ impl Registry {
         registry.register(Box::new(background::BackgroundDef));
         registry.register(Box::new(clock::ClockDef));
         registry.register(Box::new(message::MessageDef));
+        registry.register(Box::new(username::UsernameDef));
+        registry.register(Box::new(password::PasswordDef));
         registry
     }
 

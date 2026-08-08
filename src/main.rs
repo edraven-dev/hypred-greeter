@@ -6,6 +6,8 @@
 //!   2   greetd IPC transport failure
 //!   101 panic
 
+mod auth;
+mod backend;
 mod cli;
 #[macro_use]
 mod log;
@@ -60,9 +62,46 @@ fn main() {
         }
         problems.extend(layout.problems);
 
-        let registry = widgets::Registry::builtin();
+        let backend: Box<dyn backend::Backend> = if args.demo {
+            Box::new(backend::DemoBackend::new())
+        } else {
+            match backend::GreetdBackend::connect() {
+                Ok(backend) => Box::new(backend),
+                Err(err) => {
+                    log::error!("{err}");
+                    std::process::exit(1);
+                }
+            }
+        };
+
         let bus = Rc::new(ui::bus::Bus::default());
-        let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, bus.clone(), args.demo);
+        let gtk_app = app.downgrade();
+        let auth = auth::Auth::start(
+            backend,
+            bus.clone(),
+            args.demo,
+            // Placeholder until the session picker lands (M6).
+            Box::new(|| (vec!["true".into()], vec![])),
+            Box::new(move || {
+                // greetd starts the chosen session once we exit.
+                log::info!("session handed to greetd; exiting");
+                if let Some(app) = gtk_app.upgrade() {
+                    app.quit();
+                } else {
+                    std::process::exit(0);
+                }
+            }),
+        );
+
+        let initial_username = if args.demo {
+            std::env::var("USER").unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let handle = ui::ctx::AppHandle::new(auth, bus.clone(), initial_username);
+
+        let registry = widgets::Registry::builtin();
+        let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, handle, args.demo);
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
 
