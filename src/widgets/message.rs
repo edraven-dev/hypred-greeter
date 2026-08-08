@@ -34,11 +34,12 @@ impl WidgetDef for MessageDef {
                     label.add_css_class("hg-message-error");
                     label.set_label(text);
                 }
-                // A fresh prompt starts a fresh conversation — clear stale
-                // errors so the user isn't typing under a red herring.
-                UiEvent::Prompt { .. } => {
+                // Secret prompts clear stale errors; visible prompts (OTP,
+                // security questions) must show their text — the masked
+                // entry alone gives no clue what PAM is asking.
+                UiEvent::Prompt { secret, text } => {
                     label.remove_css_class("hg-message-error");
-                    label.set_label("");
+                    label.set_label(if *secret { "" } else { text });
                 }
                 UiEvent::Busy(_) | UiEvent::SessionChanged(_) => {}
             }

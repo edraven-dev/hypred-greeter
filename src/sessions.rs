@@ -5,7 +5,6 @@
 use std::path::Path;
 
 use crate::config;
-use crate::log::warn_;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {

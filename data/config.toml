@@ -1,0 +1,31 @@
+# hypred-greeter configuration. Every key is optional; this file documents
+# the defaults. Relative [paths] entries resolve against this file's
+# directory (/etc/greetd/hypred-greeter/). A broken config never blocks
+# login: problems fall back to defaults and show up in an on-screen banner.
+
+[paths]
+layout = "layout.toml"     # widget tree; missing file → built-in layout
+style = "style.css"        # GTK4 CSS; missing file → built-in style
+
+[background]
+# Default image for `background` widgets (they can override per-widget).
+# image = "/usr/share/hypred-greeter/background.png"
+fit = "cover"              # cover | contain | fill | scale-down
+
+[gtk]
+# Unset keys leave the GTK defaults alone.
+# dark = true
+# theme = "adw-gtk3-dark"
+# icon-theme = "Papirus-Dark"
+# cursor-theme = "Adwaita"
+# font = "Cantarell 14"
+
+[commands]
+reboot = ["systemctl", "reboot"]
+poweroff = ["systemctl", "poweroff"]
+
+[sessions]
+# Prepended to the Exec of X11 sessions (from xsessions/ dirs).
+x11-prefix = ["startx", "/usr/bin/env"]
+# Extra KEY=value pairs handed to greetd's start_session.
+# env = ["XCURSOR_SIZE=24"]

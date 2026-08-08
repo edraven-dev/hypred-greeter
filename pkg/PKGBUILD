@@ -1,0 +1,44 @@
+# Maintainer: edraven <edraven.dev@gmail.com>
+# Release PKGBUILD — reference copy; the AUR repo carries the live one.
+pkgname=hypred-greeter
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="greetd greeter where the layout is yours: TOML widget tree + GTK4 CSS, every widget addressable"
+arch=(x86_64)
+url="https://github.com/edraven/hypred-greeter"
+license=(GPL-3.0-or-later)
+depends=(gtk4 greetd)
+makedepends=(cargo)
+backup=(etc/greetd/hypred-greeter/config.toml
+        etc/greetd/hypred-greeter/layout.toml
+        etc/greetd/hypred-greeter/style.css)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/hypred-greeter "$pkgdir/usr/bin/hypred-greeter"
+  install -Dm644 data/config.toml "$pkgdir/etc/greetd/hypred-greeter/config.toml"
+  install -Dm644 data/layout.toml "$pkgdir/etc/greetd/hypred-greeter/layout.toml"
+  install -Dm644 data/style.css "$pkgdir/etc/greetd/hypred-greeter/style.css"
+  install -Dm644 data/tmpfiles.conf "$pkgdir/usr/lib/tmpfiles.d/hypred-greeter.conf"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

@@ -43,8 +43,6 @@ window.hg-window {
   font-weight: 300;
 }
 
-.hg-username entry,
-.hg-password entry,
 entry.hg-username,
 entry.hg-password {
   background-color: alpha(#000000, 0.35);

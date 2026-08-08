@@ -243,7 +243,7 @@ mod tests {
     fn drive(scenario: impl Fn(&Rc<Auth>, &dyn Fn())) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
-        context.with_thread_default(|| {
+        let acquired = context.with_thread_default(|| {
             let bus = Rc::new(Bus::default());
             let sink = log.clone();
             bus.subscribe(move |event| {
@@ -272,6 +272,7 @@ mod tests {
             };
             scenario(&auth, &pump);
         });
+        acquired.expect("test context must be acquirable");
         Rc::try_unwrap(log).unwrap().into_inner()
     }
 

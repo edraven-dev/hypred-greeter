@@ -10,7 +10,6 @@ use gtk4::prelude::*;
 use std::path::Path;
 
 use crate::config;
-use crate::log::{error, info};
 
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
 

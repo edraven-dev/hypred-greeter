@@ -5,7 +5,6 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use crate::log::{info, warn_};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/greetd/hypred-greeter/config.toml";
 

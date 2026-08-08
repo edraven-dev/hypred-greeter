@@ -6,7 +6,6 @@ pub mod node;
 
 pub use node::{Node, Props};
 
-use crate::log::info;
 use node::Common;
 use std::path::Path;
 

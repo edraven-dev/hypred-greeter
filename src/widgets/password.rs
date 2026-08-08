@@ -37,6 +37,20 @@ impl WidgetDef for PasswordDef {
             entry.grab_focus();
         });
 
+        // Escape backs out of a stuck PAM conversation (e.g. an MFA prompt
+        // you can't answer) so the next Enter starts fresh.
+        let app = ctx.app.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Escape {
+                app.auth.cancel();
+                gtk::glib::Propagation::Stop
+            } else {
+                gtk::glib::Propagation::Proceed
+            }
+        });
+        entry.add_controller(keys);
+
         let weak = entry.downgrade();
         ctx.bus.subscribe(move |event| {
             let Some(entry) = weak.upgrade() else { return };

@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::log::warn_;
 
 pub const STATE_PATH: &str = "/var/lib/hypred-greeter/state.toml";
 
