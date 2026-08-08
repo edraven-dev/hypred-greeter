@@ -9,9 +9,12 @@
 mod cli;
 #[macro_use]
 mod log;
+mod config;
+mod ui;
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
+use std::rc::Rc;
 
 fn main() {
     // A panic that unwinds into the GTK main loop wedges the greeter without
@@ -28,17 +31,35 @@ fn main() {
         std::process::exit(1);
     }
 
+    let loaded = config::load(args.config.as_deref());
+    for problem in &loaded.problems {
+        log::error!("{problem}");
+    }
+
+    // NON_UNIQUE: two demo instances (or demo beside the real greeter) must
+    // never collapse into one via the GApplication DBus single-instance dance.
     let app = gtk::Application::builder()
         .application_id("dev.edraven.hypred-greeter")
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    let demo = args.demo;
+    let args = Rc::new(args);
+    let loaded = Rc::new(loaded);
     app.connect_activate(move |app| {
+        ui::apply_gtk_settings(&loaded.config.gtk);
+        let style = loaded.resolve(args.style.as_deref(), &loaded.config.paths.style);
+        let css_problems = ui::load_css(&style);
+        for problem in &css_problems {
+            log::warn_!("{problem}");
+        }
+
         let window = gtk::ApplicationWindow::builder()
             .application(app)
             .title("hypred-greeter")
             .build();
-        if demo {
+        window.add_css_class("hg-window");
+        window.set_widget_name("hg-window");
+        if args.demo {
             window.set_default_size(1280, 800);
         } else {
             window.fullscreen();

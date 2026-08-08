@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 shlex = "2"
 async-channel = "2"
+serde_ignored = "0.1.14"
 
 [profile.release]
 lto = "thin"

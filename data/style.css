@@ -1,0 +1,64 @@
+/* hypred-greeter built-in stylesheet — a neutral dark default.
+   Every widget is addressable: class .hg-<kind>, default name #hg-<kind>,
+   plus any `name`/`class` set in layout.toml. Full selector table in the
+   README. Override with [paths].style or --style. */
+
+@define-color bg #16161e;
+@define-color fg #c8ccd4;
+@define-color muted #565f89;
+@define-color accent #7aa2f7;
+@define-color accent-fg #16161e;
+@define-color danger #f7768e;
+
+window.hg-window {
+  background-color: @bg;
+  color: @fg;
+  font-size: 15px;
+}
+
+/* problems loading config/layout/css land here — keep it visible */
+.hg-banner {
+  background-color: alpha(@danger, 0.15);
+  color: @danger;
+  border-bottom: 1px solid alpha(@danger, 0.4);
+  padding: 8px 16px;
+}
+
+.hg-card {
+  background-color: alpha(#000000, 0.35);
+  border: 1px solid alpha(@muted, 0.35);
+  border-radius: 16px;
+  padding: 28px 32px;
+}
+
+.hg-clock {
+  font-size: 42px;
+  font-weight: 300;
+}
+
+.hg-username entry,
+.hg-password entry,
+entry.hg-username,
+entry.hg-password {
+  background-color: alpha(#000000, 0.35);
+  color: @fg;
+  border: 1px solid alpha(@muted, 0.5);
+  border-radius: 8px;
+  padding: 8px 12px;
+  caret-color: @accent;
+  min-width: 220px;
+}
+
+.hg-message { color: @muted; }
+.hg-message.hg-message-error { color: @danger; }
+
+.hg-session dropdown > button {
+  border-radius: 8px;
+}
+
+.hg-power button {
+  background-color: alpha(@muted, 0.2);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.hg-power button:hover { background-color: alpha(@danger, 0.3); }
