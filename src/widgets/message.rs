@@ -40,7 +40,7 @@ impl WidgetDef for MessageDef {
                     label.remove_css_class("hg-message-error");
                     label.set_label("");
                 }
-                UiEvent::Busy(_) => {}
+                UiEvent::Busy(_) | UiEvent::SessionChanged(_) => {}
             }
         });
         Ok(label.upcast())

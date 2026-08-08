@@ -10,6 +10,8 @@ mod containers;
 mod label;
 mod message;
 mod password;
+mod power;
+mod session;
 mod username;
 
 use gtk4 as gtk;
@@ -72,6 +74,8 @@ impl Registry {
         registry.register(Box::new(message::MessageDef));
         registry.register(Box::new(username::UsernameDef));
         registry.register(Box::new(password::PasswordDef));
+        registry.register(Box::new(session::SessionDef));
+        registry.register(Box::new(power::PowerDef));
         registry
     }
 

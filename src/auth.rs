@@ -252,6 +252,7 @@ mod tests {
                     UiEvent::Info(text) => format!("info {text}"),
                     UiEvent::AuthError(text) => format!("autherror {text}"),
                     UiEvent::Busy(busy) => format!("busy {busy}"),
+                    UiEvent::SessionChanged(index) => format!("session {index}"),
                 });
             });
             let auth = Auth::start(

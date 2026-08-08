@@ -13,6 +13,8 @@ mod cli;
 mod log;
 mod config;
 mod layout;
+mod sessions;
+mod state;
 mod ui;
 mod widgets;
 
@@ -74,14 +76,48 @@ fn main() {
             }
         };
 
+        let session_list = sessions::discover();
+        if session_list.is_empty() {
+            problems.push("no sessions found in wayland-sessions/xsessions".into());
+        }
+        let saved = state::load();
+        let initial_username = saved
+            .last_user
+            .clone()
+            .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
+            .unwrap_or_default();
+        let shared = ui::ctx::Shared::new(initial_username, session_list, saved);
+
         let bus = Rc::new(ui::bus::Bus::default());
         let gtk_app = app.downgrade();
+        let resolver = shared.clone();
+        let resolver_config = loaded.clone();
+        let demo = args.demo;
         let auth = auth::Auth::start(
             backend,
             bus.clone(),
             args.demo,
-            // Placeholder until the session picker lands (M6).
-            Box::new(|| (vec!["true".into()], vec![])),
+            Box::new(move || {
+                let username = resolver.username.borrow().clone();
+                {
+                    let mut state = resolver.state.borrow_mut();
+                    state.last_user = Some(username.clone());
+                    if let Some(session) = resolver.selected() {
+                        state.last_session.insert(username, session.stem.clone());
+                    }
+                    if !demo {
+                        state::save(&state);
+                    }
+                }
+                match resolver.selected() {
+                    Some(session) => {
+                        sessions::start_command(session, &resolver_config.config.sessions)
+                    }
+                    // greetd rejects an empty cmd; the error surfaces in the
+                    // message widget rather than silently doing nothing.
+                    None => (Vec::new(), Vec::new()),
+                }
+            }),
             Box::new(move || {
                 // greetd starts the chosen session once we exit.
                 log::info!("session handed to greetd; exiting");
@@ -93,12 +129,7 @@ fn main() {
             }),
         );
 
-        let initial_username = if args.demo {
-            std::env::var("USER").unwrap_or_default()
-        } else {
-            String::new()
-        };
-        let handle = ui::ctx::AppHandle::new(auth, bus.clone(), initial_username);
+        let handle = ui::ctx::AppHandle::new(auth, bus.clone(), shared);
 
         let registry = widgets::Registry::builtin();
         let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, handle, args.demo);

@@ -49,7 +49,7 @@ impl WidgetDef for PasswordDef {
                 UiEvent::Prompt { .. } => {
                     entry.grab_focus();
                 }
-                UiEvent::Info(_) => {}
+                UiEvent::Info(_) | UiEvent::SessionChanged(_) => {}
             }
         });
         Ok(entry.upcast())

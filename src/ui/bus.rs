@@ -15,6 +15,9 @@ pub enum UiEvent {
     AuthError(String),
     /// An auth round-trip is in flight; widgets can disable inputs.
     Busy(bool),
+    /// The selected session changed from outside the picker (e.g. the
+    /// username's remembered session kicked in).
+    SessionChanged(usize),
 }
 
 #[derive(Default)]
