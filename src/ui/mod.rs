@@ -2,6 +2,8 @@
 //! GTK skips bad rules, we log them; a missing file falls back to the
 //! embedded default so the greeter always renders something styled.
 
+pub mod ctx;
+
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use std::path::Path;
@@ -10,6 +12,26 @@ use crate::config;
 use crate::log::{error, info};
 
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
+
+/// Window content: the built layout tree, with a problem banner stacked on
+/// top when config/layout/css loading recorded anything worth showing.
+pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
+    root.set_hexpand(true);
+    root.set_vexpand(true);
+    if problems.is_empty() {
+        return root;
+    }
+    let banner = gtk::Label::builder()
+        .label(problems.join("\n"))
+        .wrap(true)
+        .xalign(0.0)
+        .build();
+    banner.add_css_class("hg-banner");
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.append(&banner);
+    column.append(&root);
+    column.upcast()
+}
 
 /// Load the user stylesheet (or the embedded default) at USER priority so it
 /// wins over theme/application styles. Returns problems for the banner.

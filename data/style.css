@@ -24,11 +24,18 @@ window.hg-window {
   padding: 8px 16px;
 }
 
-.hg-card {
+/* the default layout's login card (`name = "card"`) */
+#card {
   background-color: alpha(#000000, 0.35);
   border: 1px solid alpha(@muted, 0.35);
   border-radius: 16px;
   padding: 28px 32px;
+}
+
+/* a widget that failed to build renders as an inline ⚠ placeholder */
+.hg-error {
+  color: @danger;
+  font-weight: bold;
 }
 
 .hg-clock {

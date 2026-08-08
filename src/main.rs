@@ -10,7 +10,9 @@ mod cli;
 #[macro_use]
 mod log;
 mod config;
+mod layout;
 mod ui;
+mod widgets;
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -48,10 +50,20 @@ fn main() {
     app.connect_activate(move |app| {
         ui::apply_gtk_settings(&loaded.config.gtk);
         let style = loaded.resolve(args.style.as_deref(), &loaded.config.paths.style);
-        let css_problems = ui::load_css(&style);
-        for problem in &css_problems {
-            log::warn_!("{problem}");
+        let mut problems = loaded.problems.clone();
+        problems.extend(ui::load_css(&style));
+
+        let layout_path = loaded.resolve(args.layout.as_deref(), &loaded.config.paths.layout);
+        let layout = layout::load(&layout_path, !args.demo);
+        for problem in &layout.problems {
+            log::error!("{problem}");
         }
+        problems.extend(layout.problems);
+
+        let registry = widgets::Registry::builtin();
+        let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, args.demo);
+        let root = layout::build::build_node(&ctx, &layout.root);
+        problems.extend(ctx.take_problems());
 
         let window = gtk::ApplicationWindow::builder()
             .application(app)
@@ -59,6 +71,7 @@ fn main() {
             .build();
         window.add_css_class("hg-window");
         window.set_widget_name("hg-window");
+        window.set_child(Some(&ui::window_content(&problems, root)));
         if args.demo {
             window.set_default_size(1280, 800);
         } else {

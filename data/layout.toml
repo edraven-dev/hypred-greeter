@@ -1,0 +1,40 @@
+# hypred-greeter built-in layout — also the fallback whenever a user layout
+# fails to load. Root is an overlay: the background fills it, everything else
+# floats above, placed by `anchor` (or halign/valign) + `margin`.
+# Copy this file, point [paths].layout at your copy, move things around.
+
+[root]
+widget = "overlay"
+
+[[root.children]]
+widget = "background"
+
+[[root.children]]
+widget = "clock"
+format = "%H:%M"
+anchor = "top"
+margin = [48, 0, 0, 0]
+
+[[root.children]]
+widget = "box"
+name = "card"
+orientation = "vertical"
+spacing = 12
+anchor = "center"
+
+  [[root.children.children]]
+  widget = "username"
+
+  [[root.children.children]]
+  widget = "password"
+
+  [[root.children.children]]
+  widget = "message"
+
+  [[root.children.children]]
+  widget = "session"
+
+[[root.children]]
+widget = "power"
+anchor = "bottom-right"
+margin = [0, 24, 24, 0]
