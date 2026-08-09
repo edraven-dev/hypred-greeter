@@ -1,5 +1,3 @@
-//! Command-line arguments. Six flags don't justify a parser dependency.
-
 use std::path::PathBuf;
 
 const USAGE: &str = "\

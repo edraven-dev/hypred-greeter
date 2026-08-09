@@ -1,5 +1,4 @@
-//! Leveled stderr logging. greetd forwards the greeter's stderr to the
-//! journal, so plain eprintln with a level tag is all the machinery needed.
+//! greetd forwards the greeter's stderr to the journal — eprintln is enough.
 
 macro_rules! info {
     ($($arg:tt)*) => { eprintln!("[hypred-greeter] {}", format_args!($($arg)*)) };

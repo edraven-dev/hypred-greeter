@@ -1,7 +1,3 @@
-//! Session discovery: .desktop entries from wayland-sessions/ and xsessions/
-//! under every XDG_DATA_DIRS component. The parser is deliberately tiny —
-//! we need five keys, not a freedesktop library.
-
 use std::path::Path;
 
 use crate::config;
@@ -31,25 +27,20 @@ impl Kind {
 
 #[derive(Debug, Clone)]
 pub struct Session {
-    /// Desktop entry Name — what the picker shows.
     pub name: String,
     pub exec: Vec<String>,
     pub kind: Kind,
-    /// Filename stem, e.g. "hyprland-uwsm".
     pub stem: String,
-    /// DesktopNames (";"-separated) → XDG_CURRENT_DESKTOP.
     pub desktop_names: Option<String>,
 }
 
 impl Session {
-    /// State-cache identity, kind-qualified because a Wayland and an X11
-    /// session may share a stem (GNOME ships gnome.desktop in both dirs).
+    /// Kind-qualified: a Wayland and an X11 session may share a stem
+    /// (GNOME ships gnome.desktop in both dirs).
     pub fn cache_id(&self) -> String {
         format!("{}/{}", self.kind.as_str(), self.stem)
     }
 
-    /// True if `cached` (a cache_id, or a bare stem from a hand-edited
-    /// file) refers to this session.
     pub fn matches_cache_id(&self, cached: &str) -> bool {
         match cached.split_once('/') {
             Some((kind, stem)) => Kind::parse(kind) == Some(self.kind) && stem == self.stem,
@@ -64,8 +55,6 @@ pub fn discover() -> Vec<Session> {
     discover_in(&data_dirs)
 }
 
-/// The walk itself, parameterized over the search path so tests can point
-/// it at scratch directories instead of the live system.
 fn discover_in(data_dirs: &str) -> Vec<Session> {
     let mut sessions: Vec<Session> = Vec::new();
 
@@ -78,7 +67,6 @@ fn discover_in(data_dirs: &str) -> Vec<Session> {
                     continue;
                 }
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                // Earlier XDG_DATA_DIRS entries win, same-stem duplicates skip.
                 if sessions.iter().any(|s| s.stem == stem && s.kind == kind) {
                     continue;
                 }
@@ -131,7 +119,6 @@ fn parse_desktop(text: &str, stem: &str, kind: Kind) -> Option<Session> {
     })
 }
 
-/// The start_session payload for a chosen session.
 pub fn start_command(session: &Session, cfg: &config::Sessions) -> (Vec<String>, Vec<String>) {
     let mut cmd = Vec::new();
     if session.kind == Kind::X11 {
@@ -185,7 +172,6 @@ mod tests {
         assert!(env.contains(&"XDG_SESSION_TYPE=x11".to_string()));
     }
 
-    /// Scratch data-dir tree for discover_in tests; removed on drop.
     struct Tree(std::path::PathBuf);
 
     impl Tree {
@@ -247,7 +233,6 @@ mod tests {
             .write("d/wayland-sessions/alpha.desktop", "[Desktop Entry]\nName=Alpha\nExec=a\n")
             .write("d/wayland-sessions/README", "not a session")
             .write("d/wayland-sessions/broken.desktop.bak", "[Desktop Entry]\nExec=nope\n");
-        // Empty path components must be tolerated too.
         let sessions = discover_in(&format!(":{}:", tree.dirs(&["d"])));
         let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Alpha", "Zeta"]);

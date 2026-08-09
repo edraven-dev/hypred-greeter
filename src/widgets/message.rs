@@ -1,6 +1,3 @@
-//! Where PAM info and auth errors land. Any layout that wants feedback puts
-//! one of these somewhere; the default card has it under the password entry.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
@@ -31,8 +28,7 @@ impl WidgetDef for MessageDef {
                     label.add_css_class("hg-message-error");
                     label.set_label(text);
                 }
-                // Secret prompts clear stale errors; visible prompts (OTP,
-                // security questions) must show their text — the masked
+                // Visible prompts (OTP) must show their text — the masked
                 // entry alone gives no clue what PAM is asking.
                 UiEvent::Prompt { secret, text } => {
                     label.remove_css_class("hg-message-error");

@@ -1,6 +1,3 @@
-//! Layout loading: TOML text → `Node` tree, with the embedded default as the
-//! guaranteed fallback. A broken layout file must never make login impossible.
-
 pub mod build;
 pub mod node;
 
@@ -16,10 +13,8 @@ pub struct Loaded {
     pub problems: Vec<String>,
 }
 
-/// Load a layout file; fall back to the embedded default on any failure.
-/// `require_auth`: outside demo mode a tree with no `password` widget is
-/// treated as broken — a greeter you cannot log in from is worse than an
-/// unstyled one.
+/// `require_auth`: outside demo a tree with no `password` widget falls
+/// back to the built-in layout — login must never be impossible.
 pub fn load(path: &Path, require_auth: bool) -> Loaded {
     let mut problems = Vec::new();
 
@@ -176,7 +171,6 @@ fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>)
             }
         }
     }
-    // Out-of-range values are reported, not silently wrapped by `as` casts.
     let to_i32 = |v: &toml::Value| v.as_integer().and_then(|n| i32::try_from(n).ok());
     if let Some(value) = table.remove("margin") {
         let parsed = match &value {

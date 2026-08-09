@@ -1,7 +1,3 @@
-//! Runtime configuration. A broken config must never brick login: every
-//! failure here degrades to defaults and a recorded problem string that the
-//! UI surfaces as a banner. Unknown keys warn (typo detection) but load.
-
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +16,6 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Paths {
-    /// Relative paths resolve against the config file's directory.
     pub layout: PathBuf,
     pub style: PathBuf,
 }
@@ -34,7 +29,6 @@ impl Default for Paths {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Background {
-    /// Default image for `background` widgets that don't set their own.
     pub image: Option<PathBuf>,
     pub fit: Fit,
 }
@@ -50,8 +44,6 @@ pub enum Fit {
 }
 
 impl Fit {
-    /// Same kebab-case vocabulary as the serde derive — one source of truth
-    /// for config files and widget props alike.
     pub fn parse(value: &str) -> Option<Self> {
         toml::Value::String(value.to_string()).try_into().ok()
     }
@@ -95,9 +87,7 @@ impl Default for Commands {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Sessions {
-    /// Prepended to the Exec of X11 sessions (from xsessions/ dirs).
     pub x11_prefix: Vec<String>,
-    /// Extra KEY=value pairs passed to greetd's start_session.
     pub env: Vec<String>,
 }
 
@@ -107,12 +97,9 @@ impl Default for Sessions {
     }
 }
 
-/// A loaded config plus everything the UI needs to explain what went wrong.
 pub struct Loaded {
     pub config: Config,
-    /// Directory that [paths] entries resolve against.
     pub base_dir: PathBuf,
-    /// Human-readable problems to surface as a banner. Empty = clean load.
     pub problems: Vec<String>,
 }
 
@@ -151,8 +138,6 @@ fn parse(text: &str) -> Result<Config, toml::de::Error> {
 }
 
 impl Loaded {
-    /// Resolve a [paths] entry: CLI flag beats config, relative paths are
-    /// anchored at the config directory.
     pub fn resolve(&self, cli_override: Option<&Path>, configured: &Path) -> PathBuf {
         let path = cli_override.unwrap_or(configured);
         if path.is_absolute() {

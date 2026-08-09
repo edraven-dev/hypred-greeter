@@ -1,8 +1,3 @@
-//! Last-user / last-session cache in /var/lib/hypred-greeter/state.toml
-//! (ship a tmpfiles.d entry owning it as the greeter user). Read/write
-//! failures are logged and shrugged off — demo mode has no write access
-//! there and that's fine.
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,7 +8,7 @@ pub const STATE_PATH: &str = "/var/lib/hypred-greeter/state.toml";
 #[serde(rename_all = "kebab-case", default)]
 pub struct State {
     pub last_user: Option<String>,
-    /// username → session stem
+    /// username → kind-qualified session id ("wayland/hyprland-uwsm")
     pub last_session: HashMap<String, String>,
 }
 
@@ -37,7 +32,6 @@ pub fn save(state: &State) {
         Ok(text) => text,
         Err(err) => return warn_!("state serialize: {err}"),
     };
-    // Write-then-rename so a crash mid-write can't corrupt the cache.
     let tmp = format!("{STATE_PATH}.new");
     let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, STATE_PATH));
     if let Err(err) = result {

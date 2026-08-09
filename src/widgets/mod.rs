@@ -1,9 +1,3 @@
-//! The widget seam. A widget kind is a `WidgetDef` registered under its
-//! `widget = "..."` name; adding one is a new file plus a line in
-//! `Registry::builtin()`. The trait is object-safe with concrete inputs so a
-//! future dynamically-loaded addon (`libloading` + `register(&mut Registry)`)
-//! needs no trait changes.
-
 mod background;
 mod clock;
 mod containers;
@@ -22,16 +16,10 @@ use crate::layout::Node;
 use crate::ui::ctx::BuildCtx;
 
 pub trait WidgetDef {
-    /// The layout file's `widget = "..."` value; also the `hg-<kind>` CSS stem.
     fn kind(&self) -> &'static str;
 
-    /// Build the GTK widget for `node`. Containers recurse via
-    /// `ctx.build_child()`; errors degrade to an inline placeholder, never a
-    /// build abort.
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError>;
 
-    /// Containers consume `node.children`; for anything else a child in the
-    /// layout file is a mistake worth flagging.
     fn is_container(&self) -> bool {
         false
     }

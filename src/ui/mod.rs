@@ -1,8 +1,3 @@
-//! Window shell, CSS loading, GTK settings. CSS problems are never fatal:
-//! GTK skips bad rules, we log them; a missing or unreadable file falls
-//! back to the embedded default so the greeter always renders something
-//! styled.
-
 pub mod bus;
 pub mod ctx;
 
@@ -14,8 +9,6 @@ use crate::config;
 
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
 
-/// Window content: the built layout tree, with a problem banner stacked on
-/// top when config/layout/css loading recorded anything worth showing.
 pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
     root.set_hexpand(true);
     root.set_vexpand(true);
@@ -30,21 +23,16 @@ pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
     column.upcast()
 }
 
-/// Load the user stylesheet (or the embedded default) at USER priority so it
-/// wins over theme/application styles. Returns problems for the banner.
+/// USER priority so the stylesheet wins over theme/application styles.
 pub fn load_css(path: &Path) -> Vec<String> {
     let provider = gtk::CssProvider::new();
     provider.connect_parsing_error(|_, section, err| {
-        // Non-fatal by design: GTK drops the bad rule and continues.
         error!("css {section}: {err}");
     });
 
     let mut problems = Vec::new();
-    // Probe with a read, not exists(): an unreadable file (bad permissions
-    // after a root chown, broken ACL) must degrade exactly like a missing
-    // one — defaults plus a banner. regreet silently skipped bad --style
-    // paths; be loud instead. On success load_from_path so relative url()
-    // references in the stylesheet still resolve against its directory.
+    // Probe with a read so unreadable degrades like missing; on success
+    // load_from_path so relative url() refs resolve against the file's dir.
     match std::fs::read_to_string(path) {
         Ok(_) => {
             info!("style: {}", path.display());

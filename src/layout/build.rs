@@ -1,7 +1,3 @@
-//! The build walk: `Node` tree → GTK widget tree via the registry. Every
-//! failure is localized — an unknown widget or bad prop becomes an inline
-//! placeholder plus a recorded problem, and the rest of the tree still builds.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
@@ -28,9 +24,9 @@ pub fn build_node(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
 
     let widget = match built {
         Ok(widget) => {
-            // Typo sweep only after a full build: a widget that errored out
-            // early never read its remaining props, and flagging those as
-            // "unknown" would bury the real problem in false ones.
+            // Typo sweep only after a full build: a failed widget never
+            // read its remaining props — flagging those as "unknown" would
+            // bury the real problem in false ones.
             for key in node.props.unconsumed() {
                 ctx.problem(format!("{} ({}): unknown property `{key}`", node.path, node.kind));
             }
@@ -43,8 +39,6 @@ pub fn build_node(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
     widget
 }
 
-/// Visible, styleable stand-in for a widget that failed to build. Keeps the
-/// layout's shape so the problem is obvious and the rest still works.
 fn placeholder(ctx: &BuildCtx, node: &Node, err: &WidgetError) -> gtk::Widget {
     ctx.problem(format!("{} ({}): {err}", node.path, node.kind));
     let label = gtk::Label::builder()

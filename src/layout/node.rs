@@ -1,7 +1,3 @@
-//! Parsed layout tree. Parsing is forgiving: every recoverable problem is
-//! recorded as a string and the affected prop/subtree is skipped — a typo in
-//! one widget must never take down the whole layout.
-
 use gtk4::Align;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -9,20 +5,15 @@ use std::collections::HashSet;
 use crate::widgets::WidgetError;
 
 pub struct Node {
-    /// The `widget = "..."` kind, resolved against the registry.
     pub kind: String,
-    /// CSS name (`#name`); defaults to `hg-<kind>` when absent.
     pub name: Option<String>,
-    /// Extra CSS classes on top of the automatic `hg-<kind>`.
     pub classes: Vec<String>,
     pub common: Common,
     pub props: Props,
     pub children: Vec<Node>,
-    /// Dotted position in the layout file, for error messages.
     pub path: String,
 }
 
-/// Properties every widget shares, applied by the build walk.
 #[derive(Default)]
 pub struct Common {
     pub halign: Option<Align>,
@@ -36,8 +27,6 @@ pub struct Common {
     pub visible: Option<bool>,
 }
 
-/// Widget-specific properties: what's left of the node's table after the
-/// common keys. Accessors track consumption so the build walk can flag typos.
 pub struct Props {
     table: toml::Table,
     consumed: RefCell<HashSet<String>>,
@@ -84,7 +73,6 @@ impl Props {
         }
     }
 
-    /// Keys the widget never looked at — almost always typos.
     pub fn unconsumed(&self) -> Vec<String> {
         let consumed = self.consumed.borrow();
         self.table.keys().filter(|k| !consumed.contains(*k)).cloned().collect()
@@ -101,8 +89,6 @@ pub fn parse_align(value: &str) -> Option<Align> {
     })
 }
 
-/// `anchor` is sugar for halign+valign, meaningful mostly for overlay
-/// children: "center", "top", "bottom-right", "left", "fill", ...
 pub fn parse_anchor(value: &str) -> Option<(Align, Align)> {
     Some(match value {
         "center" => (Align::Center, Align::Center),
@@ -140,8 +126,6 @@ mod tests {
     fn type_mismatch_errors_but_still_consumes_the_key() {
         let p = props("col = \"two\"\n");
         assert!(p.int("col").is_err());
-        // The key was looked at — it must not resurface as an
-        // "unknown property" typo warning.
         assert!(p.unconsumed().is_empty());
     }
 

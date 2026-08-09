@@ -1,10 +1,6 @@
-//! hypred-greeter — a greetd greeter where the layout is yours.
-//!
-//! Exit codes (greeter-run.sh relies on this process always exiting):
-//!   0   session started (greetd takes over)
-//!   1   startup failure (bad CLI, no GREETD_SOCK outside --demo, GTK init)
-//!   2   greetd IPC transport failure
-//!   101 panic
+//! Exit codes: 0 session started, 1 startup failure, 2 greetd transport
+//! failure, 101 panic. greetd starts the chosen session only after this
+//! process exits, so it must always exit.
 
 mod auth;
 mod backend;
@@ -23,8 +19,8 @@ use gtk4::prelude::*;
 use std::rc::Rc;
 
 fn main() {
-    // A panic that unwinds into the GTK main loop wedges the greeter without
-    // exiting — greetd then never starts a session (dark screen). Die loudly.
+    // A panic unwinding into the GTK main loop wedges the process without
+    // exiting — that's a dark screen at boot.
     std::panic::set_hook(Box::new(|info| {
         eprintln!("[hypred-greeter] panic: {info}");
         std::process::exit(101);
@@ -42,8 +38,8 @@ fn main() {
         log::error!("{problem}");
     }
 
-    // NON_UNIQUE: two demo instances (or demo beside the real greeter) must
-    // never collapse into one via the GApplication DBus single-instance dance.
+    // NON_UNIQUE: GApplication would otherwise deduplicate a second demo
+    // instance over DBus into the first one.
     let app = gtk::Application::builder()
         .application_id("dev.edraven.hypred-greeter")
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
@@ -113,13 +109,10 @@ fn main() {
                     Some(session) => {
                         sessions::start_command(session, &resolver_config.config.sessions)
                     }
-                    // greetd rejects an empty cmd; the error surfaces in the
-                    // message widget rather than silently doing nothing.
                     None => (Vec::new(), Vec::new()),
                 }
             }),
             Box::new(move || {
-                // greetd starts the chosen session once we exit.
                 log::info!("session handed to greetd; exiting");
                 if let Some(app) = gtk_app.upgrade() {
                     app.quit();
@@ -150,7 +143,7 @@ fn main() {
         window.present();
     });
 
-    // gtk::Application swallows unknown argv; we already parsed ours.
+    // Empty argv: GApplication would otherwise choke on our own flags.
     let exit = app.run_with_args::<&str>(&[]);
     std::process::exit(exit.get() as i32);
 }

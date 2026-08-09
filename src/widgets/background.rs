@@ -1,7 +1,3 @@
-//! Wallpaper as an ordinary widget: place it as an overlay's base child (the
-//! default layout does), or anywhere else — it's not window machinery.
-//! Renders via gtk::Picture: plain image decoding, no GStreamer.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use std::path::PathBuf;
@@ -32,8 +28,6 @@ impl WidgetDef for BackgroundDef {
 
         let picture = gtk::Picture::builder().content_fit(fit.to_gtk()).build();
         match image {
-            // No image configured is a legitimate look (CSS paints the
-            // window); a configured-but-unreadable image is a problem.
             None => {}
             Some(path) if path.is_file() => picture.set_filename(Some(&path)),
             Some(path) => {

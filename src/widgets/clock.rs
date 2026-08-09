@@ -1,6 +1,3 @@
-//! Time display. `format` is glib strftime (%H:%M, %A %e %B, ...);
-//! ticks once a second, which is cheap enough to not special-case.
-
 use gtk4 as gtk;
 use gtk4::glib;
 use gtk4::prelude::*;

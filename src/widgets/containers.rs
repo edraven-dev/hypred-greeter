@@ -1,6 +1,3 @@
-//! Layout containers: `box`, `overlay`, `grid`. These are the only widgets
-//! that consume `children`; everything else is a leaf.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
@@ -53,8 +50,8 @@ impl WidgetDef for OverlayDef {
     }
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-        // First child is the measured base (where `background` belongs);
-        // the rest float above it, positioned by halign/valign/anchor.
+        // GtkOverlay: the first child is the measured base; the rest
+        // float above it, positioned by halign/valign.
         let overlay = gtk::Overlay::new();
         let mut children = node.children.iter();
         if let Some(base) = children.next() {
@@ -84,10 +81,9 @@ impl WidgetDef for GridDef {
             .column_spacing(node.props.int("column-spacing")?.unwrap_or(0) as i32)
             .build();
         for (i, child) in node.children.iter().enumerate() {
-            // Cell position lives on the child node but belongs to the grid;
-            // read it before build_child so it doesn't count as unknown.
-            // Each key is read independently: a bad `col` must not stop
-            // `row` from being consumed (and later flagged as "unknown").
+            // Cell props live on the child node but belong to the grid;
+            // read each independently before build_child so all count as
+            // consumed even when one has a bad type.
             let cell = |key: &str, default: i64| match child.props.int(key) {
                 Ok(value) => value.unwrap_or(default) as i32,
                 Err(err) => {

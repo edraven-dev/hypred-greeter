@@ -1,6 +1,3 @@
-//! Username entry, prefilled with the last authenticated user (or $USER in
-//! demo). Enter moves focus onward — submission belongs to the password.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 

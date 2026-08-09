@@ -1,5 +1,3 @@
-//! Static text. `text` is the content; `wrap` opts into line wrapping.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 

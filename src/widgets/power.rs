@@ -1,7 +1,3 @@
-//! Reboot / power-off buttons running the [commands] argv arrays. In demo
-//! they announce instead of executing. Buttons carry stable names
-//! (#hg-power-reboot, #hg-power-poweroff) so themes can style or hide each.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 

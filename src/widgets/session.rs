@@ -1,7 +1,3 @@
-//! Session picker: a DropDown over the discovered .desktop sessions,
-//! preselected from the per-user last-session cache. X11 entries are
-//! suffixed so identical names stay distinguishable.
-
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
