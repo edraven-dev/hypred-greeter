@@ -13,9 +13,7 @@ backup=(etc/greetd/hypred-greeter/config.toml
         etc/greetd/hypred-greeter/layout.toml
         etc/greetd/hypred-greeter/style.css)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-# TODO: run updpkgsums once the v0.1.0 tag is pushed — a fixed tarball must
-# ship a real checksum before this goes to the AUR (SKIP is VCS-only).
-sha256sums=('SKIP')
+sha256sums=('b16a1866df16a2397659804ece8f7acfa6243f9c73714154314ab50056366a01')
 
 prepare() {
   cd "$pkgname-$pkgver"
