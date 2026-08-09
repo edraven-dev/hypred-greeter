@@ -7,7 +7,7 @@ is no button you cannot move, restyle, or delete, and none of it needs a
 recompile.
 
 - **Rust + GTK4, small on purpose**: no async runtime, no UI framework on
-  top, ~150 crates, minutes to build from source with `paru`.
+  top, ~150 crates, minutes to build from source.
 - **Widget/addon architecture**: each widget kind is a small `WidgetDef`
   implementation behind a registry; adding one (a profile menu, a battery
   readout) is a new file plus one registration line.
@@ -19,8 +19,12 @@ recompile.
 
 ## Install
 
+Not on the AUR yet — build with `makepkg` straight from a clone:
+
 ```sh
-paru -S hypred-greeter        # or hypred-greeter-git
+git clone https://github.com/edraven-dev/hypred-greeter.git
+cd hypred-greeter/pkg
+makepkg -si -p PKGBUILD-git   # or PKGBUILD to build the pinned v0.1.0 release
 ```
 
 Point greetd at it in `/etc/greetd/config.toml`. Under
