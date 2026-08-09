@@ -168,6 +168,22 @@ possible later without breaking existing widgets.
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
   transport failure, `101` panic.
 
+## Development
+
+One-time setup after cloning:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+That enables the tracked hooks: `pre-commit` (cargo fmt check), `commit-msg`
+(conventional commits: `type(scope): subject`), `pre-push` (clippy
+`-D warnings` + tests). CI runs the same three checks on every PR, plus a
+weekly RustSec dependency audit.
+
+Work lands via feature branches (`feat/...`, `fix/...`, `chore/...`) and
+PRs to `main`; commits follow [Conventional Commits](https://www.conventionalcommits.org/).
+
 ## License
 
 GPL-3.0-or-later.

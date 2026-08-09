@@ -1,0 +1,9 @@
+#!/bin/sh
+# The heavier gate: lint + tests before anything leaves the machine.
+set -e
+
+echo "pre-push: cargo clippy" >&2
+cargo clippy --all-targets --quiet -- -D warnings
+
+echo "pre-push: cargo test" >&2
+cargo test --quiet
