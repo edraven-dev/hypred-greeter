@@ -57,7 +57,7 @@ entry.hg-password {
 .hg-message { color: @muted; }
 .hg-message.hg-message-error { color: @danger; }
 
-.hg-session dropdown > button {
+dropdown.hg-session > button {
   border-radius: 8px;
 }
 

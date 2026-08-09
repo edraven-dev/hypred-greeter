@@ -86,18 +86,17 @@ impl WidgetDef for GridDef {
         for (i, child) in node.children.iter().enumerate() {
             // Cell position lives on the child node but belongs to the grid;
             // read it before build_child so it doesn't count as unknown.
-            let cell = (|| -> Result<(i32, i32, i32, i32), WidgetError> {
-                Ok((
-                    child.props.int("col")?.unwrap_or(0) as i32,
-                    child.props.int("row")?.unwrap_or(i as i64) as i32,
-                    child.props.int("col-span")?.unwrap_or(1) as i32,
-                    child.props.int("row-span")?.unwrap_or(1) as i32,
-                ))
-            })();
-            let (col, row, col_span, row_span) = cell.unwrap_or_else(|err| {
-                ctx.problem(format!("{}: {err}", child.path));
-                (0, i as i32, 1, 1)
-            });
+            // Each key is read independently: a bad `col` must not stop
+            // `row` from being consumed (and later flagged as "unknown").
+            let cell = |key: &str, default: i64| match child.props.int(key) {
+                Ok(value) => value.unwrap_or(default) as i32,
+                Err(err) => {
+                    ctx.problem(format!("{}: {err}", child.path));
+                    default as i32
+                }
+            };
+            let (col, row) = (cell("col", 0), cell("row", i as i64));
+            let (col_span, row_span) = (cell("col-span", 1), cell("row-span", 1));
             grid.attach(&ctx.build_child(child), col, row, col_span, row_span);
         }
         Ok(grid.upcast())

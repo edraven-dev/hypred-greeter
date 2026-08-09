@@ -118,3 +118,37 @@ pub fn parse_anchor(value: &str) -> Option<(Align, Align)> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn props(toml: &str) -> Props {
+        Props::new(toml.parse().unwrap())
+    }
+
+    #[test]
+    fn accessors_read_and_default() {
+        let p = props("format = \"%H\"\nspacing = 4\nwrap = true\n");
+        assert_eq!(p.str("format").unwrap().as_deref(), Some("%H"));
+        assert_eq!(p.str_or("missing", "x").unwrap(), "x");
+        assert_eq!(p.int("spacing").unwrap(), Some(4));
+        assert_eq!(p.bool("wrap").unwrap(), Some(true));
+    }
+
+    #[test]
+    fn type_mismatch_errors_but_still_consumes_the_key() {
+        let p = props("col = \"two\"\n");
+        assert!(p.int("col").is_err());
+        // The key was looked at — it must not resurface as an
+        // "unknown property" typo warning.
+        assert!(p.unconsumed().is_empty());
+    }
+
+    #[test]
+    fn unconsumed_lists_exactly_the_untouched_keys() {
+        let p = props("read = 1\nnever-read = 2\n");
+        let _ = p.int("read");
+        assert_eq!(p.unconsumed(), ["never-read"]);
+    }
+}

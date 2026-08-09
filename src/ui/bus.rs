@@ -3,6 +3,7 @@
 //! which is what keeps the flow generic instead of password-hardcoded.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
@@ -20,20 +21,24 @@ pub enum UiEvent {
     SessionChanged(usize),
 }
 
+type Subscriber = Rc<dyn Fn(&UiEvent)>;
+
 #[derive(Default)]
 pub struct Bus {
-    subscribers: RefCell<Vec<Box<dyn Fn(&UiEvent)>>>,
+    subscribers: RefCell<Vec<Subscriber>>,
 }
 
 impl Bus {
     pub fn subscribe(&self, subscriber: impl Fn(&UiEvent) + 'static) {
-        self.subscribers.borrow_mut().push(Box::new(subscriber));
+        self.subscribers.borrow_mut().push(Rc::new(subscriber));
     }
 
     pub fn emit(&self, event: &UiEvent) {
-        // Subscribing from within a callback would re-borrow; collect first.
-        let subscribers = self.subscribers.borrow();
-        for subscriber in subscribers.iter() {
+        // Clone the list out (cheap Rc clones) and drop the borrow before
+        // dispatching, so a subscriber may safely subscribe() mid-event —
+        // late additions just don't receive the in-flight event.
+        let subscribers: Vec<Subscriber> = self.subscribers.borrow().clone();
+        for subscriber in &subscribers {
             subscriber(event);
         }
     }

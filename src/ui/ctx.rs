@@ -45,8 +45,8 @@ impl Shared {
     /// Index of the current username's remembered session, if any.
     pub fn remembered_session(&self) -> Option<usize> {
         let state = self.state.borrow();
-        let stem = state.last_session.get(&*self.username.borrow())?;
-        self.sessions.iter().position(|s| &s.stem == stem)
+        let cached = state.last_session.get(&*self.username.borrow())?;
+        self.sessions.iter().position(|s| s.matches_cache_id(cached))
     }
 }
 
@@ -103,6 +103,9 @@ impl AppHandle {
 
 pub struct BuildCtx<'a> {
     pub config: &'a Config,
+    /// Directory the config file lives in; relative asset paths (e.g. a
+    /// background image next to the theme css) resolve against it.
+    pub base_dir: &'a std::path::Path,
     pub registry: &'a Registry,
     /// Widgets clone this into closures to hear auth/system events.
     pub bus: Rc<Bus>,
@@ -114,9 +117,23 @@ pub struct BuildCtx<'a> {
 }
 
 impl<'a> BuildCtx<'a> {
-    pub fn new(config: &'a Config, registry: &'a Registry, app: AppHandle, demo: bool) -> Self {
+    pub fn new(
+        config: &'a Config,
+        base_dir: &'a std::path::Path,
+        registry: &'a Registry,
+        app: AppHandle,
+        demo: bool,
+    ) -> Self {
         let bus = app.bus.clone();
-        Self { config, registry, bus, app, demo, problems: RefCell::new(Vec::new()) }
+        Self { config, base_dir, registry, bus, app, demo, problems: RefCell::new(Vec::new()) }
+    }
+
+    pub fn resolve_path(&self, path: &std::path::Path) -> std::path::PathBuf {
+        if path.is_absolute() {
+            path.into()
+        } else {
+            self.base_dir.join(path)
+        }
     }
 
     /// Containers recurse through this so every node gets the same

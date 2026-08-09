@@ -22,7 +22,9 @@ impl WidgetDef for SessionDef {
         let _ = node;
         let shared = &ctx.app.shared;
         if shared.sessions.is_empty() {
-            return Err(WidgetError::Other("no sessions found in wayland-sessions/xsessions".into()));
+            return Err(WidgetError::Other(
+                "no sessions found in wayland-sessions/xsessions".into(),
+            ));
         }
 
         let names: Vec<String> = shared

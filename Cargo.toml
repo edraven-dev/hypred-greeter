@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "A greetd greeter where the layout is yours: TOML widget tree + GTK4 CSS, every widget addressable"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/edraven/hypred-greeter"
+repository = "https://github.com/edraven-dev/hypred-greeter"
 
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_12"] }

@@ -22,7 +22,8 @@ impl WidgetDef for BackgroundDef {
         let image = match node.props.str("image")? {
             Some(path) => Some(PathBuf::from(path)),
             None => ctx.config.background.image.clone(),
-        };
+        }
+        .map(|path| ctx.resolve_path(&path));
         let fit = match node.props.str("fit")? {
             Some(value) => Fit::parse(&value)
                 .ok_or(WidgetError::Other(format!("`fit`: unknown mode `{value}`")))?,

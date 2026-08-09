@@ -6,11 +6,11 @@ pkgver=r1.0000000
 pkgrel=1
 pkgdesc="greetd greeter where the layout is yours: TOML widget tree + GTK4 CSS (git)"
 arch=(x86_64)
-url="https://github.com/edraven/hypred-greeter"
+url="https://github.com/edraven-dev/hypred-greeter"
 license=(GPL-3.0-or-later)
 depends=(gtk4 greetd)
 makedepends=(cargo git)
-provides=(hypred-greeter)
+provides=("hypred-greeter=$pkgver")
 conflicts=(hypred-greeter)
 backup=(etc/greetd/hypred-greeter/config.toml
         etc/greetd/hypred-greeter/layout.toml

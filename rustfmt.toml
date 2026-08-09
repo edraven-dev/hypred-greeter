@@ -1,0 +1,3 @@
+# Keep short struct literals/variants on one line (the style this codebase
+# is written in); everything else is rustfmt defaults (max_width = 100).
+use_small_heuristics = "Max"

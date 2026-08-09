@@ -2,9 +2,15 @@
 //! dumb pipe: requests in, responses out. All protocol decisions live here
 //! on the main thread, driven by greetd's auth_message flow — nothing is
 //! password-specific, PAM decides what gets asked.
+//!
+//! Every request carries a conversation generation and the worker echoes it
+//! back. Abandoning a conversation (cancel, auth error) bumps the
+//! generation, so late responses from the dead conversation — including the
+//! CancelSession ack itself — are recognized as stale and dropped instead
+//! of being misread as answers for the next conversation.
 
 use gtk4::glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use greetd_ipc::{AuthMessageType, Request, Response};
@@ -17,16 +23,22 @@ enum Phase {
     Idle,
     /// PAM conversation running. `stash` holds the password typed at submit,
     /// consumed by the conversation's first secret prompt.
-    Conversing { stash: Option<String>, awaiting_input: bool },
+    Conversing {
+        stash: Option<String>,
+        awaiting_input: bool,
+    },
     /// start_session sent; Success means greetd takes over.
     Starting,
 }
 
 pub struct Auth {
-    to_worker: std::sync::mpsc::Sender<Request>,
+    to_worker: std::sync::mpsc::Sender<(u64, Request)>,
     bus: Rc<Bus>,
     demo: bool,
     phase: RefCell<Phase>,
+    /// Current conversation generation; responses stamped with an older
+    /// value belong to an abandoned conversation and are dropped.
+    generation: Cell<u64>,
     /// Builds the start_session (cmd, env) once auth succeeds.
     resolve_start: Box<dyn Fn() -> (Vec<String>, Vec<String>)>,
     /// Runs after greetd confirms the session: exit 0 so greetd takes over.
@@ -43,12 +55,12 @@ impl Auth {
         resolve_start: Box<dyn Fn() -> (Vec<String>, Vec<String>)>,
         on_started: Box<dyn Fn()>,
     ) -> Rc<Self> {
-        let (to_worker, from_main) = std::sync::mpsc::channel::<Request>();
+        let (to_worker, from_main) = std::sync::mpsc::channel::<(u64, Request)>();
         let (to_main, from_worker) = async_channel::unbounded();
         std::thread::spawn(move || {
             let mut backend = backend;
-            while let Ok(request) = from_main.recv() {
-                if to_main.send_blocking(backend.roundtrip(request)).is_err() {
+            while let Ok((generation, request)) = from_main.recv() {
+                if to_main.send_blocking((generation, backend.roundtrip(request))).is_err() {
                     return;
                 }
             }
@@ -59,15 +71,16 @@ impl Auth {
             bus,
             demo,
             phase: RefCell::new(Phase::Idle),
+            generation: Cell::new(0),
             resolve_start,
             on_started,
         });
 
         let weak = Rc::downgrade(&auth);
         glib::spawn_future_local(async move {
-            while let Ok(result) = from_worker.recv().await {
+            while let Ok(reply) = from_worker.recv().await {
                 match weak.upgrade() {
-                    Some(auth) => auth.handle(result),
+                    Some(auth) => auth.handle(reply),
                     None => return,
                 }
             }
@@ -75,7 +88,8 @@ impl Auth {
         auth
     }
 
-    /// True while a roundtrip or conversation blocks new submissions.
+    /// Where the next submission will land: a fresh conversation, the
+    /// pending PAM prompt, or nowhere because a roundtrip is in flight.
     pub fn accepting_input(&self) -> AcceptState {
         match &*self.phase.borrow() {
             Phase::Idle => AcceptState::Fresh,
@@ -111,22 +125,41 @@ impl Auth {
         }
     }
 
+    /// Back out of the running conversation (Escape at a prompt).
     pub fn cancel(&self) {
         if matches!(*self.phase.borrow(), Phase::Conversing { .. }) {
             *self.phase.borrow_mut() = Phase::Idle;
-            self.send(Request::CancelSession);
+            self.abandon_conversation();
             self.bus.emit(&UiEvent::Busy(false));
         }
     }
 
+    /// Invalidate all in-flight responses of the current conversation and
+    /// tell greetd to drop it. The CancelSession is stamped with the OLD
+    /// generation so even its own ack is discarded as stale — otherwise an
+    /// Escape-then-Enter resubmit could misread that ack as the new
+    /// conversation's auth success.
+    fn abandon_conversation(&self) {
+        let stale = self.generation.get();
+        self.generation.set(stale + 1);
+        // Failure means the worker is gone; the next send() surfaces it
+        // through transport_dead, so best-effort is fine here.
+        self.to_worker.send((stale, Request::CancelSession)).ok();
+    }
+
     fn send(&self, request: Request) {
         self.bus.emit(&UiEvent::Busy(true));
-        if self.to_worker.send(request).is_err() {
+        if self.to_worker.send((self.generation.get(), request)).is_err() {
             self.transport_dead("worker thread gone");
         }
     }
 
-    fn handle(&self, result: Result<Response, BackendError>) {
+    fn handle(&self, (generation, result): (u64, Result<Response, BackendError>)) {
+        if generation != self.generation.get() {
+            // A response for an abandoned conversation; the phase already
+            // moved on. Dropping it is the entire correctness mechanism.
+            return;
+        }
         let response = match result {
             Ok(response) => response,
             Err(err) => return self.transport_dead(&err.to_string()),
@@ -144,10 +177,13 @@ impl Auth {
                 } else {
                     description
                 };
-                self.bus.emit(&UiEvent::AuthError(text));
                 *self.phase.borrow_mut() = Phase::Idle;
-                self.to_worker.send(Request::CancelSession).ok();
+                self.abandon_conversation();
+                // Busy(false) BEFORE AuthError: the password widget re-grabs
+                // focus on AuthError, and GTK refuses focus while the entry
+                // is still insensitive from Busy(true).
                 self.bus.emit(&UiEvent::Busy(false));
+                self.bus.emit(&UiEvent::AuthError(text));
             }
         }
     }
@@ -184,6 +220,8 @@ impl Auth {
         if let Phase::Conversing { awaiting_input, .. } = &mut *self.phase.borrow_mut() {
             *awaiting_input = true;
         }
+        // Busy(false) first so the prompt's grab_focus lands on a
+        // sensitive entry.
         self.bus.emit(&UiEvent::Busy(false));
         self.bus.emit(&UiEvent::Prompt { secret, text });
     }
@@ -205,7 +243,8 @@ impl Auth {
                     (self.on_started)();
                 }
             }
-            // cancel_session ack
+            // Success in Idle can only be a stale-generation leak, which
+            // handle() already filters; ignore defensively.
             Phase::Idle => {}
         }
     }
@@ -223,7 +262,7 @@ impl Auth {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AcceptState {
     /// No conversation: next submit starts one.
     Fresh,
@@ -300,6 +339,19 @@ mod tests {
     }
 
     #[test]
+    fn wrong_password_reenables_input_before_reporting_error() {
+        let log = drive(|auth, pump| {
+            auth.begin("edraven".into(), "fail".into());
+            pump();
+        });
+        // The password widget grabs focus on autherror; the entry must
+        // already be sensitive (busy false) or GTK refuses the grab.
+        let busy_false = log.iter().position(|e| e == "busy false").unwrap();
+        let auth_error = log.iter().position(|e| e.starts_with("autherror")).unwrap();
+        assert!(busy_false < auth_error, "{log:?}");
+    }
+
+    #[test]
     fn demo_mfa_walks_visible_and_info_prompts() {
         let log = drive(|auth, pump| {
             auth.begin("mfa".into(), "hunter2".into());
@@ -310,6 +362,37 @@ mod tests {
         });
         assert!(log.contains(&"prompt[false] Token:".to_string()), "{log:?}");
         assert!(log.contains(&"info demo: any token accepted".to_string()), "{log:?}");
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn cancel_then_resubmit_drops_the_stale_cancel_ack() {
+        // Escape at the MFA prompt, then immediately resubmit without
+        // letting the CancelSession ack drain first. Without generation
+        // stamping the ack was misread as the NEW conversation's auth
+        // success and started an unauthenticated session.
+        let log = drive(|auth, pump| {
+            auth.begin("mfa".into(), "pw".into());
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+            auth.cancel();
+            auth.begin("mfa".into(), "pw".into());
+            pump();
+            // The new conversation must be waiting at its Token prompt,
+            // not torn down by the stale ack.
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+        });
+        assert!(!log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn cancel_when_idle_is_a_no_op() {
+        let log = drive(|auth, pump| {
+            auth.cancel();
+            pump();
+            auth.begin("edraven".into(), "pw".into());
+            pump();
+        });
         assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
     }
 

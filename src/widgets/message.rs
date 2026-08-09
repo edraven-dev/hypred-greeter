@@ -17,10 +17,7 @@ impl WidgetDef for MessageDef {
     }
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-        let label = gtk::Label::builder()
-            .label(node.props.str_or("text", "")?)
-            .wrap(true)
-            .build();
+        let label = gtk::Label::builder().label(node.props.str_or("text", "")?).wrap(true).build();
 
         let weak = label.downgrade();
         ctx.bus.subscribe(move |event| {

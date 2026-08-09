@@ -70,7 +70,8 @@ pub fn parse_str(text: &str, problems: &mut Vec<String>) -> Option<Node> {
         }
     };
     for key in table.keys() {
-        problems.push(format!("layout: unknown top-level key `{key}` (everything nests under [root])"));
+        problems
+            .push(format!("layout: unknown top-level key `{key}` (everything nests under [root])"));
     }
 
     parse_node(root, "root".into(), problems)
@@ -145,7 +146,8 @@ fn parse_node(mut table: toml::Table, path: String, problems: &mut Vec<String>) 
 
 fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>) -> Common {
     let mut common = Common::default();
-    let mut bad = |key: &str, expected: &str| problems.push(format!("{path}: `{key}` must be {expected}"));
+    let mut bad =
+        |key: &str, expected: &str| problems.push(format!("{path}: `{key}` must be {expected}"));
 
     if let Some(value) = table.remove("anchor") {
         match value.as_str().and_then(node::parse_anchor) {
@@ -174,24 +176,28 @@ fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>)
             }
         }
     }
+    // Out-of-range values are reported, not silently wrapped by `as` casts.
+    let to_i32 = |v: &toml::Value| v.as_integer().and_then(|n| i32::try_from(n).ok());
     if let Some(value) = table.remove("margin") {
-        let as_i32 = |v: &toml::Value| v.as_integer().map(|n| n as i32);
-        match &value {
-            toml::Value::Integer(n) => common.margin = Some([*n as i32; 4]),
+        let parsed = match &value {
+            toml::Value::Integer(_) => to_i32(&value).map(|n| [n; 4]),
             toml::Value::Array(items) if items.len() == 4 => {
-                let parts: Vec<i32> = items.iter().filter_map(as_i32).collect();
-                match parts.as_slice() {
-                    [t, r, b, l] => common.margin = Some([*t, *r, *b, *l]),
-                    _ => bad("margin", "an integer or [top, right, bottom, left]"),
+                match items.iter().filter_map(to_i32).collect::<Vec<_>>().as_slice() {
+                    [t, r, b, l] => Some([*t, *r, *b, *l]),
+                    _ => None,
                 }
             }
-            _ => bad("margin", "an integer or [top, right, bottom, left]"),
+            _ => None,
+        };
+        match parsed {
+            Some(margin) => common.margin = Some(margin),
+            None => bad("margin", "an integer or [top, right, bottom, left]"),
         }
     }
     for (key, slot) in [("width", &mut common.width), ("height", &mut common.height)] {
         if let Some(value) = table.remove(key) {
-            match value.as_integer() {
-                Some(n) => *slot = Some(n as i32),
+            match to_i32(&value) {
+                Some(n) => *slot = Some(n),
                 None => bad(key, "an integer"),
             }
         }

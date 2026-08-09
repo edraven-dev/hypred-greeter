@@ -103,7 +103,7 @@ fn main() {
                     let mut state = resolver.state.borrow_mut();
                     state.last_user = Some(username.clone());
                     if let Some(session) = resolver.selected() {
-                        state.last_session.insert(username, session.stem.clone());
+                        state.last_session.insert(username, session.cache_id());
                     }
                     if !demo {
                         state::save(&state);
@@ -129,17 +129,16 @@ fn main() {
             }),
         );
 
-        let handle = ui::ctx::AppHandle::new(auth, bus.clone(), shared);
+        let handle = ui::ctx::AppHandle::new(auth, bus, shared);
 
         let registry = widgets::Registry::builtin();
-        let ctx = ui::ctx::BuildCtx::new(&loaded.config, &registry, handle, args.demo);
+        let ctx =
+            ui::ctx::BuildCtx::new(&loaded.config, &loaded.base_dir, &registry, handle, args.demo);
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
 
-        let window = gtk::ApplicationWindow::builder()
-            .application(app)
-            .title("hypred-greeter")
-            .build();
+        let window =
+            gtk::ApplicationWindow::builder().application(app).title("hypred-greeter").build();
         window.add_css_class("hg-window");
         window.set_widget_name("hg-window");
         window.set_child(Some(&ui::window_content(&problems, root)));

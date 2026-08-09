@@ -6,10 +6,27 @@ use std::path::Path;
 
 use crate::config;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Wayland,
     X11,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Wayland => "wayland",
+            Kind::X11 => "x11",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "wayland" => Some(Kind::Wayland),
+            "x11" => Some(Kind::X11),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -18,15 +35,38 @@ pub struct Session {
     pub name: String,
     pub exec: Vec<String>,
     pub kind: Kind,
-    /// Filename stem; identity for the last-session cache.
+    /// Filename stem, e.g. "hyprland-uwsm".
     pub stem: String,
     /// DesktopNames (";"-separated) → XDG_CURRENT_DESKTOP.
     pub desktop_names: Option<String>,
 }
 
+impl Session {
+    /// State-cache identity, kind-qualified because a Wayland and an X11
+    /// session may share a stem (GNOME ships gnome.desktop in both dirs).
+    pub fn cache_id(&self) -> String {
+        format!("{}/{}", self.kind.as_str(), self.stem)
+    }
+
+    /// True if `cached` (a cache_id, or a bare stem from a hand-edited
+    /// file) refers to this session.
+    pub fn matches_cache_id(&self, cached: &str) -> bool {
+        match cached.split_once('/') {
+            Some((kind, stem)) => Kind::parse(kind) == Some(self.kind) && stem == self.stem,
+            None => cached == self.stem,
+        }
+    }
+}
+
 pub fn discover() -> Vec<Session> {
     let data_dirs = std::env::var("XDG_DATA_DIRS")
         .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    discover_in(&data_dirs)
+}
+
+/// The walk itself, parameterized over the search path so tests can point
+/// it at scratch directories instead of the live system.
+fn discover_in(data_dirs: &str) -> Vec<Session> {
     let mut sessions: Vec<Session> = Vec::new();
 
     for dir in data_dirs.split(':').filter(|d| !d.is_empty()) {
@@ -44,7 +84,7 @@ pub fn discover() -> Vec<Session> {
                 }
                 match std::fs::read_to_string(&path) {
                     Ok(text) => {
-                        if let Some(session) = parse_desktop(&text, &stem, kind.clone()) {
+                        if let Some(session) = parse_desktop(&text, &stem, kind) {
                             sessions.push(session);
                         }
                     }
@@ -99,12 +139,8 @@ pub fn start_command(session: &Session, cfg: &config::Sessions) -> (Vec<String>,
     }
     cmd.extend(session.exec.iter().cloned());
 
-    let session_type = match session.kind {
-        Kind::Wayland => "wayland",
-        Kind::X11 => "x11",
-    };
     let mut env = vec![
-        format!("XDG_SESSION_TYPE={session_type}"),
+        format!("XDG_SESSION_TYPE={}", session.kind.as_str()),
         format!("XDG_SESSION_DESKTOP={}", session.stem),
     ];
     if let Some(names) = &session.desktop_names {
@@ -147,5 +183,73 @@ mod tests {
         let (cmd, env) = start_command(&session, &cfg);
         assert_eq!(cmd, ["startx", "/usr/bin/env", "plasma"]);
         assert!(env.contains(&"XDG_SESSION_TYPE=x11".to_string()));
+    }
+
+    /// Scratch data-dir tree for discover_in tests; removed on drop.
+    struct Tree(std::path::PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("hg-sessions-{tag}-{}", std::process::id()));
+            std::fs::remove_dir_all(&root).ok();
+            Self(root)
+        }
+
+        fn write(&self, rel: &str, content: &str) -> &Self {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+            self
+        }
+
+        fn dirs(&self, subdirs: &[&str]) -> String {
+            subdirs
+                .iter()
+                .map(|d| self.0.join(d).to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[test]
+    fn earlier_data_dir_wins_for_the_same_stem() {
+        let tree = Tree::new("precedence");
+        tree.write("a/wayland-sessions/hypr.desktop", "[Desktop Entry]\nName=First\nExec=one\n")
+            .write("b/wayland-sessions/hypr.desktop", "[Desktop Entry]\nName=Second\nExec=two\n");
+        let sessions = discover_in(&tree.dirs(&["a", "b"]));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "First");
+        assert_eq!(sessions[0].exec, ["one"]);
+    }
+
+    #[test]
+    fn same_stem_across_kinds_keeps_both() {
+        let tree = Tree::new("kinds");
+        tree.write("d/wayland-sessions/gnome.desktop", "[Desktop Entry]\nName=GNOME\nExec=gw\n")
+            .write("d/xsessions/gnome.desktop", "[Desktop Entry]\nName=GNOME\nExec=gx\n");
+        let sessions = discover_in(&tree.dirs(&["d"]));
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|s| s.kind == Kind::Wayland && s.exec == ["gw"]));
+        assert!(sessions.iter().any(|s| s.kind == Kind::X11 && s.exec == ["gx"]));
+    }
+
+    #[test]
+    fn non_desktop_files_skip_and_names_sort() {
+        let tree = Tree::new("misc");
+        tree.write("d/wayland-sessions/zeta.desktop", "[Desktop Entry]\nName=Zeta\nExec=z\n")
+            .write("d/wayland-sessions/alpha.desktop", "[Desktop Entry]\nName=Alpha\nExec=a\n")
+            .write("d/wayland-sessions/README", "not a session")
+            .write("d/wayland-sessions/broken.desktop.bak", "[Desktop Entry]\nExec=nope\n");
+        // Empty path components must be tolerated too.
+        let sessions = discover_in(&format!(":{}:", tree.dirs(&["d"])));
+        let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "Zeta"]);
     }
 }

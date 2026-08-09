@@ -5,7 +5,6 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/greetd/hypred-greeter/config.toml";
 
 #[derive(Debug, Default, Deserialize)]
@@ -51,14 +50,10 @@ pub enum Fit {
 }
 
 impl Fit {
+    /// Same kebab-case vocabulary as the serde derive — one source of truth
+    /// for config files and widget props alike.
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value {
-            "cover" => Fit::Cover,
-            "contain" => Fit::Contain,
-            "fill" => Fit::Fill,
-            "scale-down" => Fit::ScaleDown,
-            _ => return None,
-        })
+        toml::Value::String(value.to_string()).try_into().ok()
     }
 
     pub fn to_gtk(self) -> gtk4::ContentFit {
@@ -160,7 +155,11 @@ impl Loaded {
     /// anchored at the config directory.
     pub fn resolve(&self, cli_override: Option<&Path>, configured: &Path) -> PathBuf {
         let path = cli_override.unwrap_or(configured);
-        if path.is_absolute() { path.into() } else { self.base_dir.join(path) }
+        if path.is_absolute() {
+            path.into()
+        } else {
+            self.base_dir.join(path)
+        }
     }
 }
 

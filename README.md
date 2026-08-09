@@ -124,9 +124,9 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 | `.hg-background` | the wallpaper picture |
 | `.hg-clock` | the clock label |
 | `entry.hg-username` | username entry |
-| `.hg-password` / `.hg-password entry` | password entry (GtkPasswordEntry) |
+| `entry.hg-password` | password entry (GtkPasswordEntry) |
 | `.hg-message`, `.hg-message.hg-message-error` | PAM messages / auth errors |
-| `.hg-session dropdown` | session picker |
+| `dropdown.hg-session`, `dropdown.hg-session > button` | session picker |
 | `.hg-power button`, `#hg-power-reboot`, `#hg-power-poweroff` | power buttons |
 | `#card` (or any `name` you set) | your named widgets |
 

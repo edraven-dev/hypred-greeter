@@ -1,6 +1,7 @@
 //! Window shell, CSS loading, GTK settings. CSS problems are never fatal:
-//! GTK skips bad rules, we log them; a missing file falls back to the
-//! embedded default so the greeter always renders something styled.
+//! GTK skips bad rules, we log them; a missing or unreadable file falls
+//! back to the embedded default so the greeter always renders something
+//! styled.
 
 pub mod bus;
 pub mod ctx;
@@ -21,11 +22,7 @@ pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
     if problems.is_empty() {
         return root;
     }
-    let banner = gtk::Label::builder()
-        .label(problems.join("\n"))
-        .wrap(true)
-        .xalign(0.0)
-        .build();
+    let banner = gtk::Label::builder().label(problems.join("\n")).wrap(true).xalign(0.0).build();
     banner.add_css_class("hg-banner");
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);
@@ -43,13 +40,20 @@ pub fn load_css(path: &Path) -> Vec<String> {
     });
 
     let mut problems = Vec::new();
-    if path.exists() {
-        info!("style: {}", path.display());
-        provider.load_from_path(path);
-    } else {
-        // regreet silently skipped a bad --style path; be loud instead.
-        problems.push(format!("style {} not found — using built-in style", path.display()));
-        provider.load_from_string(DEFAULT_STYLE);
+    // Probe with a read, not exists(): an unreadable file (bad permissions
+    // after a root chown, broken ACL) must degrade exactly like a missing
+    // one — defaults plus a banner. regreet silently skipped bad --style
+    // paths; be loud instead. On success load_from_path so relative url()
+    // references in the stylesheet still resolve against its directory.
+    match std::fs::read_to_string(path) {
+        Ok(_) => {
+            info!("style: {}", path.display());
+            provider.load_from_path(path);
+        }
+        Err(err) => {
+            problems.push(format!("style {}: {err} — using built-in style", path.display()));
+            provider.load_from_string(DEFAULT_STYLE);
+        }
     }
 
     gtk::style_context_add_provider_for_display(

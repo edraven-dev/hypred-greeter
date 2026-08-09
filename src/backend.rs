@@ -168,9 +168,8 @@ mod tests {
         let server = fake_greetd(socket.clone());
 
         let mut backend = GreetdBackend::connect_to(&socket).unwrap();
-        let response = backend
-            .roundtrip(Request::CreateSession { username: "edraven".into() })
-            .unwrap();
+        let response =
+            backend.roundtrip(Request::CreateSession { username: "edraven".into() }).unwrap();
         assert!(matches!(
             response,
             Response::AuthMessage { auth_message_type: AuthMessageType::Secret, .. }

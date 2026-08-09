@@ -5,7 +5,7 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="greetd greeter where the layout is yours: TOML widget tree + GTK4 CSS, every widget addressable"
 arch=(x86_64)
-url="https://github.com/edraven/hypred-greeter"
+url="https://github.com/edraven-dev/hypred-greeter"
 license=(GPL-3.0-or-later)
 depends=(gtk4 greetd)
 makedepends=(cargo)
@@ -13,6 +13,8 @@ backup=(etc/greetd/hypred-greeter/config.toml
         etc/greetd/hypred-greeter/layout.toml
         etc/greetd/hypred-greeter/style.css)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# TODO: run updpkgsums once the v0.1.0 tag is pushed — a fixed tarball must
+# ship a real checksum before this goes to the AUR (SKIP is VCS-only).
 sha256sums=('SKIP')
 
 prepare() {

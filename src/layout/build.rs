@@ -10,7 +10,7 @@ use crate::ui::ctx::BuildCtx;
 use crate::widgets::WidgetError;
 
 pub fn build_node(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
-    let widget = match ctx.registry.get(&node.kind) {
+    let built = match ctx.registry.get(&node.kind) {
         Some(def) => {
             if !def.is_container() && !node.children.is_empty() {
                 ctx.problem(format!(
@@ -18,25 +18,28 @@ pub fn build_node(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
                     node.path, node.kind
                 ));
             }
-            match def.build(ctx, node) {
-                Ok(widget) => widget,
-                Err(err) => placeholder(ctx, node, &err),
-            }
+            def.build(ctx, node)
         }
-        None => placeholder(
-            ctx,
-            node,
-            &WidgetError::Other(format!(
-                "unknown widget (available: {})",
-                ctx.registry.kinds().join(", ")
-            )),
-        ),
+        None => Err(WidgetError::Other(format!(
+            "unknown widget (available: {})",
+            ctx.registry.kinds().join(", ")
+        ))),
+    };
+
+    let widget = match built {
+        Ok(widget) => {
+            // Typo sweep only after a full build: a widget that errored out
+            // early never read its remaining props, and flagging those as
+            // "unknown" would bury the real problem in false ones.
+            for key in node.props.unconsumed() {
+                ctx.problem(format!("{} ({}): unknown property `{key}`", node.path, node.kind));
+            }
+            widget
+        }
+        Err(err) => placeholder(ctx, node, &err),
     };
 
     apply_common(&widget, node);
-    for key in node.props.unconsumed() {
-        ctx.problem(format!("{} ({}): unknown property `{key}`", node.path, node.kind));
-    }
     widget
 }
 
