@@ -20,6 +20,21 @@ fit = "cover"              # cover | contain | fill | scale-down
 # cursor-theme = "Adwaita"
 # font = "Cantarell 14"
 
+[auth]
+# Open the PAM conversation as soon as a username is known (the remembered
+# user at startup, or when the username entry settles) instead of at the
+# first password submit. With pam_fprintd ahead of the password modules this
+# arms the fingerprint reader the moment the greeter appears. Eager
+# conversations get cancelled (restarts, username changes) — carry the PAM
+# stack from README "Fingerprint" before enabling, or faillock counts each
+# cancel as a failed login.
+eager = false
+# Seconds after the last input during which a conversation parked at the
+# password prompt is restarted so the reader re-arms (pam_fprintd gives up
+# after its timeout; only a fresh conversation arms it again). 0 = never
+# restart a parked conversation.
+rearm-window = 0
+
 [commands]
 reboot = ["systemctl", "reboot"]
 poweroff = ["systemctl", "poweroff"]

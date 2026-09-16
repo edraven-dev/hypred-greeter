@@ -1,8 +1,10 @@
 use gtk4 as gtk;
+use gtk4::glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
-use crate::auth::{AcceptState, Auth};
+use crate::auth::Auth;
 use crate::config::Config;
 use crate::layout::{build, Node};
 use crate::ui::bus::{Bus, UiEvent};
@@ -48,11 +50,12 @@ pub struct AppHandle {
     pub auth: Rc<Auth>,
     pub bus: Rc<Bus>,
     pub shared: Rc<Shared>,
+    edit_debounce: Rc<Cell<Option<glib::SourceId>>>,
 }
 
 impl AppHandle {
     pub fn new(auth: Rc<Auth>, bus: Rc<Bus>, shared: Rc<Shared>) -> Self {
-        Self { auth, bus, shared }
+        Self { auth, bus, shared, edit_debounce: Rc::default() }
     }
 
     pub fn username(&self) -> String {
@@ -76,11 +79,30 @@ impl AppHandle {
     }
 
     pub fn submit_response(&self, text: &str) {
-        match self.auth.accepting_input() {
-            AcceptState::Fresh => self.auth.begin(self.username(), text.to_string()),
-            AcceptState::Prompted => self.auth.respond(Some(text.to_string())),
-            AcceptState::Busy => {}
+        self.auth.submit(text.to_string());
+    }
+
+    /// Eager mode opens the conversation once typing settles.
+    pub fn username_edited(&self) {
+        if !self.auth.eager() {
+            return;
         }
+        if let Some(pending) = self.edit_debounce.take() {
+            pending.remove();
+        }
+        let (auth, shared, slot) =
+            (self.auth.clone(), self.shared.clone(), self.edit_debounce.clone());
+        let source = glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            // Cleared here so a fired source is never removed twice.
+            slot.set(None);
+            let username = shared.username.borrow().clone();
+            auth.start_eager(&username);
+        });
+        self.edit_debounce.set(Some(source));
+    }
+
+    pub fn note_activity(&self) {
+        self.auth.note_activity();
     }
 
     pub fn emit(&self, event: &UiEvent) {

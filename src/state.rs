@@ -38,3 +38,18 @@ pub fn save(state: &State) {
         warn_!("state save {STATE_PATH}: {err}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeded_state_file_parses() {
+        let text =
+            "last-user = \"edraven\"\n\n[last-session]\nedraven = \"wayland/hyprland-uwsm\"\n";
+        let state: State = toml::from_str(text).unwrap();
+        assert_eq!(state.last_user.as_deref(), Some("edraven"));
+        assert_eq!(state.last_session["edraven"], "wayland/hyprland-uwsm");
+        assert_eq!(toml::to_string(&state).unwrap(), text);
+    }
+}

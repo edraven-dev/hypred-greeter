@@ -9,6 +9,7 @@ pub struct Config {
     pub paths: Paths,
     pub background: Background,
     pub gtk: Gtk,
+    pub auth: Auth,
     pub commands: Commands,
     pub sessions: Sessions,
 }
@@ -66,6 +67,14 @@ pub struct Gtk {
     pub icon_theme: Option<String>,
     pub cursor_theme: Option<String>,
     pub font: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct Auth {
+    pub eager: bool,
+    /// Seconds; 0 = never restart a parked conversation.
+    pub rearm_window: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +177,16 @@ mod tests {
         assert_eq!(config.gtk.dark, Some(false));
         assert_eq!(config.gtk.icon_theme.as_deref(), Some("Papirus"));
         assert!(matches!(config.background.fit, Fit::ScaleDown));
+    }
+
+    #[test]
+    fn auth_section_defaults_off_and_parses() {
+        let config = parse("").unwrap();
+        assert!(!config.auth.eager);
+        assert_eq!(config.auth.rearm_window, 0);
+        let config = parse("[auth]\neager = true\nrearm-window = 120\n").unwrap();
+        assert!(config.auth.eager);
+        assert_eq!(config.auth.rearm_window, 120);
     }
 
     #[test]
