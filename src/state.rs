@@ -1,8 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub const STATE_PATH: &str = "/var/lib/hypred-greeter/state.toml";
+const STATE_DIR: &str = "/var/lib/hypred-greeter";
+
+/// One file per VT: a second greetd instance (another user's entry point)
+/// must not overwrite whom this one remembers.
+fn file_name(vt: Option<&str>) -> String {
+    match vt {
+        Some(vt) => format!("state-vt{vt}.toml"),
+        None => "state.toml".into(),
+    }
+}
+
+fn path() -> PathBuf {
+    Path::new(STATE_DIR).join(file_name(crate::seat::vt().as_deref()))
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
@@ -13,15 +26,15 @@ pub struct State {
 }
 
 pub fn load() -> State {
-    let path = Path::new(STATE_PATH);
-    match std::fs::read_to_string(path) {
+    let path = path();
+    match std::fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text).unwrap_or_else(|err| {
-            warn_!("state {STATE_PATH}: {err}");
+            warn_!("state {}: {err}", path.display());
             State::default()
         }),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => State::default(),
         Err(err) => {
-            warn_!("state {STATE_PATH}: {err}");
+            warn_!("state {}: {err}", path.display());
             State::default()
         }
     }
@@ -32,16 +45,24 @@ pub fn save(state: &State) {
         Ok(text) => text,
         Err(err) => return warn_!("state serialize: {err}"),
     };
-    let tmp = format!("{STATE_PATH}.new");
-    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, STATE_PATH));
+    let path = path();
+    let tmp = path.with_extension("toml.new");
+    let result = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &path));
     if let Err(err) = result {
-        warn_!("state save {STATE_PATH}: {err}");
+        warn_!("state save {}: {err}", path.display());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_vt_has_its_own_file() {
+        assert_eq!(file_name(Some("1")), "state-vt1.toml");
+        assert_eq!(file_name(Some("2")), "state-vt2.toml");
+        assert_eq!(file_name(None), "state.toml");
+    }
 
     #[test]
     fn seeded_state_file_parses() {

@@ -58,9 +58,12 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
 | `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font` | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds; restart a parked conversation after input — see [Fingerprint](#fingerprint-pam_fprintd)) | `false`, `0` |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)) | `false`, `0` |
 | `[commands]` | `reboot`, `poweroff` (argv arrays) | `["systemctl", ...]` |
-| `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list) | `["startx", "/usr/bin/env"]`, `[]` |
+| `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`) | `["startx", "/usr/bin/env"]`, `[]`, first by name |
+
+A key the greeter does not know (a typo like `rearm_window`) keeps its
+default in force and is named in the on-screen banner.
 
 ### layout.toml — the widget tree
 
@@ -166,15 +169,19 @@ possible later without breaking existing widgets.
   info and error messages all flow through the same bus; MFA prompts render
   via the message widget. Try it: `--demo`, username `mfa` (visible OTP
   prompt + info), username `fprint` (a fingerprint cycle: two info messages
-  around a 3 s blocking wait, then the password prompt), and password `fail`
-  for the error path.
+  around a 3 s blocking wait, then the password prompt), username `touch`
+  (the same cycle ending in a match), and password `fail` for the error
+  path.
 - **Two kinds of error**: a PAM error message mid-conversation ("Failed to
   match fingerprint") is `PamError` — shown in red for at least 1.5 s, the
   entry is left alone, the conversation goes on. Only a failed conversation
   you submitted to (`AuthError`) clears and refocuses the password entry; one
   that fails on its own (pam_nologin) is reported like a PAM error.
-- **State**: `/var/lib/hypred-greeter/state.toml` remembers the last user
-  and each user's last session (tmpfiles.d entry ships with the package).
+- **State**: `/var/lib/hypred-greeter/state-vt<N>.toml` — one file per VT
+  greetd runs the greeter on (`state.toml` without a VT), so a second greetd
+  instance for a second user keeps its own memory — remembers the last user
+  and each user's last session (tmpfiles.d entry ships with the package). A
+  session id is `<kind>/<desktop file stem>`, e.g. `wayland/hyprland-uwsm`.
   Typing a known username snaps the session picker to their remembered
   session.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
@@ -187,13 +194,20 @@ With `pam_fprintd.so` ahead of the password modules in `/etc/pam.d/greetd`,
 `[auth] eager = true` opens the PAM conversation as soon as a username is
 known — the remembered user at startup, or the username entry once typing
 settles (400 ms) or on Enter — so the reader is armed the moment the
-greeter appears. Touch to log in, or type the password as usual; the
+greeter appears.
+
+**With a remembered user and session a touch is the whole login** — no
+Enter, no click, no key: the greeter comes up with both preselected (the
+state file is written at every login; `[sessions] default` covers a user
+with no session remembered yet) and the reader armed, and a matching touch
+starts that session. `rearm-window = "always"` keeps it that way for
+as long as the greeter is up. Typing the password works as usual; the
 message widget shows pam_fprintd's own texts ("Place your right thumb on
 ...", "Failed to match fingerprint", "Verification timed out"). A touch
-starts the session selected at that moment — the user's remembered one, so
-pick another first if you want it. The conversation always belongs to the
-name shown: editing the username starts a new one, clearing it ends it, and
-a login that completes for a name no longer shown starts nothing.
+starts the session selected at that moment, so pick another first if you
+want it. The conversation always belongs to the name shown: editing the
+username starts a new one, clearing it ends it, and a login that completes
+for a name no longer shown starts nothing.
 
 What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
 
@@ -202,16 +216,29 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   is kept and delivered when that wait ends. Set pam_fprintd's `timeout=` to
   the latency you accept (5 s below).
 - **Only a fresh conversation re-arms the reader.** After its timeout
-  pam_fprintd gives up and the conversation parks at the password prompt.
-  With `rearm-window = N`, a parked conversation is restarted for `N`
-  seconds after your last input — the greeter appearing counts as input —
-  and after that on your next input: any key (Escape and Enter included),
-  pointer movement, click or touch, at most once every 3 s. Typing into the
-  password entry is the exception: while it holds text the parked prompt is
-  kept ready, so a password typed then goes through at once. With `0` a
-  parked conversation is never restarted; the reader is armed once per
-  conversation (a new one starts after a failed login or a username
-  change).
+  pam_fprintd gives up and the conversation parks at the password prompt;
+  `rearm-window` says when a parked conversation is restarted:
+  - `"always"` — after every timed-out cycle, for as long as the greeter is
+    up: a touch logs in whenever you walk up. The price is one PAM worker
+    per pam_fprintd `timeout=` and the journal lines of each cancelled
+    prompt (below), for as long as nobody logs in.
+  - `N` (seconds) — for `N` seconds after your last input (the greeter
+    appearing counts as input), and after that on your next input: any key
+    (Escape and Enter included), pointer movement, click or touch, at most
+    once every 3 s. An idle greeter goes quiet; the first touch after that
+    needs a key or the mouse first.
+  - `0` — never; the reader is armed once per conversation (a new one
+    starts after a failed login or a username change).
+
+  Typing into the password entry pauses all of it: while the entry holds
+  text the parked prompt is kept ready, so a password typed then goes
+  through at once — for 30 s after the last key; a stray character left in
+  the entry does not switch the reader off for good. A conversation that
+  ends without a fingerprint cycle — a failed login, or a park at once
+  because the reader was claimed elsewhere or not up yet — is reopened by
+  timer, so a touch works again without any input: after 3 s, doubling up
+  to 60 s, three tries; under `"always"` without a limit, and a busy reader
+  is retried every 6 s at most. None of these timers run with `0`.
 - **Eager mode cancels PAM prompts — carry the right stack before enabling
   it.** Every restart, username change and Escape on a half-answered
   prompt drops a conversation that may sit at the password prompt. pam_unix
@@ -243,20 +270,25 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   inlined copy no longer follows it. Each dropped conversation still logs
   pam_unix's `auth could not identify password` (priority crit) and
   libpam's `conversation failed`.
-- **One eager greeter per seat at a time.** fprintd lends the reader to one
-  conversation; a second greeter (another VT) that claims it first leaves
-  this one unarmed without a word, and a touch then authenticates the
-  greeter you cannot see.
+- **Only the greeter on screen arms the reader.** fprintd lends the reader
+  to one conversation at a time, so with several greetd instances (a second
+  VT for a second user) a greeter whose VT is not the active one
+  (`XDG_VTNR` vs `/sys/class/tty/tty0/active`) opens and restarts nothing,
+  lets a running cycle run out, and ignores a match that arrives meanwhile
+  — starting that session would pull the screen over to a VT nobody is
+  looking at. It re-arms within a second of coming back on screen.
 - **Escape** forgets a password submitted into a fingerprint wait (the
   entry is read-only, not disabled, while it waits) and abandons an active
   prompt (an OTP mid-way, whose text is then cleared); on a parked prompt
   it is just input (see above). **Enter on an empty entry** submits
-  nothing. After a failed login the reader re-arms on your next input, so
-  the error stays readable. An answer typed for a second-stage prompt is
-  never reused as a password if the username changed meanwhile.
+  nothing. After a failed login the reader re-arms on your next input or
+  (unless `rearm-window = 0`) after 3 s, so the error stays readable. An answer typed for a
+  second-stage prompt is never reused as a password if the username
+  changed meanwhile.
 
 Try the flow without hardware: `--demo` with `[auth] eager = true` in the
-config and username `fprint`.
+config and `USER=touch` (a login with nothing pressed) or `USER=fprint`
+(a timed-out cycle; add `rearm-window = "always"` to watch it re-arm).
 
 ## Development
 

@@ -73,8 +73,51 @@ pub struct Gtk {
 #[serde(rename_all = "kebab-case", default)]
 pub struct Auth {
     pub eager: bool,
-    /// Seconds; 0 = never restart a parked conversation.
-    pub rearm_window: u64,
+    pub rearm_window: Rearm,
+}
+
+/// `rearm-window`: seconds after the last input (0 = never), or "always".
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Rearm {
+    #[default]
+    Never,
+    Window(u64),
+    Always,
+}
+
+impl<'de> Deserialize<'de> for Rearm {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Rearm;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("seconds (0 = never) or \"always\"")
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, seconds: i64) -> Result<Rearm, E> {
+                match u64::try_from(seconds) {
+                    Ok(0) => Ok(Rearm::Never),
+                    Ok(seconds) => Ok(Rearm::Window(seconds)),
+                    Err(_) => Err(E::invalid_value(serde::de::Unexpected::Signed(seconds), &self)),
+                }
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, seconds: u64) -> Result<Rearm, E> {
+                Ok(if seconds == 0 { Rearm::Never } else { Rearm::Window(seconds) })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, word: &str) -> Result<Rearm, E> {
+                match word {
+                    "always" => Ok(Rearm::Always),
+                    _ => Err(E::invalid_value(serde::de::Unexpected::Str(word), &self)),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,11 +141,18 @@ impl Default for Commands {
 pub struct Sessions {
     pub x11_prefix: Vec<String>,
     pub env: Vec<String>,
+    /// Session id ("wayland/hyprland-uwsm") preselected for a user with
+    /// nothing remembered; else the first by name.
+    pub default: Option<String>,
 }
 
 impl Default for Sessions {
     fn default() -> Self {
-        Self { x11_prefix: vec!["startx".into(), "/usr/bin/env".into()], env: vec![] }
+        Self {
+            x11_prefix: vec!["startx".into(), "/usr/bin/env".into()],
+            env: vec![],
+            default: None,
+        }
     }
 }
 
@@ -130,7 +180,14 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
     };
 
     let config = match parse(&text) {
-        Ok(config) => config,
+        Ok((config, unknown)) => {
+            // A misspelt key silently leaves its default in force
+            // (`rearm_window` would switch re-arming off): say so on screen.
+            problems.extend(
+                unknown.iter().map(|key| format!("config {}: unknown key `{key}`", path.display())),
+            );
+            config
+        }
         Err(err) => {
             problems.push(format!("config {}: {err}", path.display()));
             Config::default()
@@ -139,11 +196,13 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
     Loaded { config, base_dir, problems }
 }
 
-fn parse(text: &str) -> Result<Config, toml::de::Error> {
+fn parse(text: &str) -> Result<(Config, Vec<String>), toml::de::Error> {
     let table: toml::Table = text.parse()?;
-    serde_ignored::deserialize(toml::Value::Table(table), |key| {
-        warn_!("config: unknown key `{key}`")
-    })
+    let mut unknown = Vec::new();
+    let config = serde_ignored::deserialize(toml::Value::Table(table), |key| {
+        unknown.push(key.to_string());
+    })?;
+    Ok((config, unknown))
 }
 
 impl Loaded {
@@ -163,7 +222,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_defaults() {
-        let config = parse("").unwrap();
+        let config = parse("").unwrap().0;
         assert_eq!(config.commands.reboot, ["systemctl", "reboot"]);
         assert_eq!(config.paths.style, PathBuf::from("style.css"));
     }
@@ -173,7 +232,8 @@ mod tests {
         let config = parse(
             "[gtk]\ndark = false\nicon-theme = \"Papirus\"\n[background]\nfit = \"scale-down\"\n",
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(config.gtk.dark, Some(false));
         assert_eq!(config.gtk.icon_theme.as_deref(), Some("Papirus"));
         assert!(matches!(config.background.fit, Fit::ScaleDown));
@@ -181,12 +241,36 @@ mod tests {
 
     #[test]
     fn auth_section_defaults_off_and_parses() {
-        let config = parse("").unwrap();
+        let config = parse("").unwrap().0;
         assert!(!config.auth.eager);
-        assert_eq!(config.auth.rearm_window, 0);
-        let config = parse("[auth]\neager = true\nrearm-window = 120\n").unwrap();
+        assert_eq!(config.auth.rearm_window, Rearm::Never);
+        let config = parse("[auth]\neager = true\nrearm-window = 120\n").unwrap().0;
         assert!(config.auth.eager);
-        assert_eq!(config.auth.rearm_window, 120);
+        assert_eq!(config.auth.rearm_window, Rearm::Window(120));
+    }
+
+    #[test]
+    fn rearm_window_takes_seconds_or_always() {
+        let rearm = |text: &str| parse(text).map(|(config, _)| config.auth.rearm_window);
+        assert_eq!(rearm("[auth]\nrearm-window = 0\n").unwrap(), Rearm::Never);
+        assert_eq!(rearm("[auth]\nrearm-window = \"always\"\n").unwrap(), Rearm::Always);
+        let err = rearm("[auth]\nrearm-window = \"forever\"\n").unwrap_err().to_string();
+        assert!(err.contains("always"), "{err}");
+        assert!(rearm("[auth]\nrearm-window = -5\n").is_err());
+    }
+
+    #[test]
+    fn unknown_keys_are_reported() {
+        let (config, unknown) = parse("[auth]\neager = true\nrearm_window = \"always\"\n").unwrap();
+        assert!(config.auth.eager);
+        assert_eq!(config.auth.rearm_window, Rearm::Never);
+        assert_eq!(unknown, ["auth.rearm_window"]);
+    }
+
+    #[test]
+    fn sessions_default_parses() {
+        let (config, _) = parse("[sessions]\ndefault = \"wayland/hyprland-uwsm\"\n").unwrap();
+        assert_eq!(config.sessions.default.as_deref(), Some("wayland/hyprland-uwsm"));
     }
 
     #[test]

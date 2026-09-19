@@ -10,17 +10,21 @@
 //! and answers the next secret prompt. Only a fresh conversation re-arms
 //! the reader, hence the restart of a parked conversation. A conversation
 //! is only ever answered, restarted or started for the user shown in the
-//! username entry.
+//! username entry. With a remembered user and session nothing has to be
+//! pressed: the reader is armed as the greeter appears, a touch starts the
+//! session, and `rearm-window = "always"` keeps it that way for as long as
+//! the greeter is up — and on screen: a greeter on a VT nobody looks at
+//! arms nothing, the reader belongs to the VT in front of the user.
 
 use gtk4::glib;
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use greetd_ipc::{AuthMessageType, Request, Response};
 
 use crate::backend::{Backend, BackendError};
-use crate::config;
+use crate::config::{self, Rearm};
 use crate::log::{error, info};
 use crate::ui::bus::{Bus, UiEvent};
 
@@ -29,11 +33,34 @@ const REARM_SPIN_GUARD: Duration = Duration::from_secs(1);
 /// Input-driven (re)opens are at least this far apart, so a stack that
 /// parks or fails at once cannot turn input into a CreateSession storm.
 const RESTART_COOLDOWN: Duration = Duration::from_secs(3);
+/// A conversation that ended without a fingerprint cycle (it failed, or
+/// parked at once: reader claimed elsewhere, not up yet) is reopened by
+/// timer, so a touch works again without any input — after this long,
+/// doubling per consecutive such end up to the cap.
+const RETRY_BASE: Duration = Duration::from_secs(3);
+const RETRY_CAP: Duration = Duration::from_secs(60);
+/// Timer retries per run of such ends unless rearm-window is "always";
+/// input re-arms regardless.
+const RETRY_LIMIT: u32 = 3;
+/// Text in the password entry keeps a parked prompt ready only this long
+/// after the last input — a stray key must not switch the reader off.
+const TYPING_HOLD: Duration = Duration::from_secs(30);
+/// How often a greeter that is off screen looks whether it is back.
+const SEAT_POLL: Duration = Duration::from_secs(1);
 
 const USERNAME_CHANGED: &str = "username changed — enter the password again";
 
 /// Gets the authenticated user; returns the session's (cmd, env).
-type ResolveStart = Box<dyn Fn(&str) -> (Vec<String>, Vec<String>)>;
+pub type ResolveStart = Box<dyn Fn(&str) -> (Vec<String>, Vec<String>)>;
+
+pub struct Hooks {
+    /// The name in the username entry.
+    pub current_username: Box<dyn Fn() -> String>,
+    pub resolve_start: ResolveStart,
+    pub on_started: Box<dyn Fn()>,
+    /// Whether this greeter's VT is the one on screen.
+    pub seat_active: Box<dyn Fn() -> bool>,
+}
 
 enum Phase {
     Idle,
@@ -51,11 +78,12 @@ enum Phase {
 }
 
 pub struct Auth {
+    me: Weak<Auth>,
     to_worker: std::sync::mpsc::Sender<(u64, Request)>,
     bus: Rc<Bus>,
     demo: bool,
     eager: bool,
-    rearm_window: Duration,
+    rearm: Rearm,
     phase: RefCell<Phase>,
     generation: Cell<u64>,
     last_activity: Cell<Instant>,
@@ -65,9 +93,17 @@ pub struct Auth {
     pending_rearm: Cell<bool>,
     /// The password entry holds text: a parked prompt is kept ready for it.
     typing: Cell<bool>,
-    current_username: Box<dyn Fn() -> String>,
-    resolve_start: ResolveStart,
-    on_started: Box<dyn Fn()>,
+    /// Consecutive conversations that ended without a fingerprint cycle.
+    quick_ends: Cell<u32>,
+    /// Bumped by every open(), which makes a retry timer armed before it
+    /// stale.
+    retry_token: Cell<u64>,
+    retry_base: Cell<Duration>,
+    retry_cap: Cell<Duration>,
+    typing_hold: Cell<Duration>,
+    seat_poll: Cell<Duration>,
+    seat_waiting: Cell<bool>,
+    hooks: Hooks,
 }
 
 impl Auth {
@@ -76,9 +112,7 @@ impl Auth {
         bus: Rc<Bus>,
         demo: bool,
         options: &config::Auth,
-        current_username: Box<dyn Fn() -> String>,
-        resolve_start: ResolveStart,
-        on_started: Box<dyn Fn()>,
+        hooks: Hooks,
     ) -> Rc<Self> {
         let (to_worker, from_main) = std::sync::mpsc::channel::<(u64, Request)>();
         let (to_main, from_worker) = async_channel::unbounded();
@@ -91,21 +125,27 @@ impl Auth {
             }
         });
 
-        let auth = Rc::new(Self {
+        let auth = Rc::new_cyclic(|me| Self {
+            me: me.clone(),
             to_worker,
             bus,
             demo,
             eager: options.eager,
-            rearm_window: Duration::from_secs(options.rearm_window),
+            rearm: options.rearm_window,
             phase: RefCell::new(Phase::Idle),
             generation: Cell::new(0),
             last_activity: Cell::new(Instant::now()),
             last_restart: Cell::new(None),
             pending_rearm: Cell::new(false),
             typing: Cell::new(false),
-            current_username,
-            resolve_start,
-            on_started,
+            quick_ends: Cell::new(0),
+            retry_token: Cell::new(0),
+            retry_base: Cell::new(RETRY_BASE),
+            retry_cap: Cell::new(RETRY_CAP),
+            typing_hold: Cell::new(TYPING_HOLD),
+            seat_poll: Cell::new(SEAT_POLL),
+            seat_waiting: Cell::new(false),
+            hooks,
         });
 
         let weak = Rc::downgrade(&auth);
@@ -146,13 +186,23 @@ impl Auth {
             _ => {}
         }
         self.drop_conversation();
-        if !username.is_empty() {
+        if username.is_empty() {
+            return;
+        }
+        if (self.hooks.seat_active)() {
             self.open(username.to_string(), None, true);
+        } else {
+            self.pending_rearm.set(true);
+            self.wait_for_seat();
         }
     }
 
     pub fn set_typing(&self, typing: bool) {
         self.typing.set(typing);
+    }
+
+    fn typing(&self) -> bool {
+        self.typing.get() && self.last_activity.get().elapsed() < self.typing_hold.get()
     }
 
     pub fn begin(&self, username: String, password: String) {
@@ -174,7 +224,7 @@ impl Auth {
         if password.is_empty() {
             return;
         }
-        let current = (self.current_username)();
+        let current = (self.hooks.current_username)();
         let mut phase = self.phase.borrow_mut();
         match &mut *phase {
             Phase::Idle => {
@@ -249,16 +299,16 @@ impl Auth {
     /// starts, the sooner that password is asked for.
     pub fn note_activity(&self) {
         self.last_activity.set(Instant::now());
+        self.quick_ends.set(0);
         if !self.eager || !self.cooled_down() {
             return;
         }
         if self.pending_rearm.get() {
             if matches!(*self.phase.borrow(), Phase::Idle) {
                 self.last_restart.set(Some(Instant::now()));
-                self.start_eager(&(self.current_username)());
+                self.start_eager(&(self.hooks.current_username)());
             }
-        } else if self.parked_for_shown_user() && !self.typing.get() && !self.rearm_window.is_zero()
-        {
+        } else if self.parked_for_shown_user() && !self.typing() && self.rearm != Rearm::Never {
             self.restart();
         }
     }
@@ -268,7 +318,7 @@ impl Auth {
     fn parked_for_shown_user(&self) -> bool {
         match &*self.phase.borrow() {
             Phase::Conversing { user, passive: true, awaiting_input: true, .. } => {
-                *user == (self.current_username)()
+                *user == (self.hooks.current_username)()
             }
             _ => false,
         }
@@ -278,25 +328,118 @@ impl Auth {
         self.last_restart.get().is_none_or(|at| at.elapsed() >= RESTART_COOLDOWN)
     }
 
-    /// A passive conversation just parked: restart it so the reader
-    /// re-arms — only after a real cycle (an info was shown; an instant
-    /// park has nothing to arm) and only while the user is around.
+    /// A passive conversation just parked. After a real cycle (an info was
+    /// shown and the module waited) it is restarted at once, so the reader
+    /// re-arms — while the user is around, or always. A park without a
+    /// cycle armed nothing; restarting it at once would spin, so that is
+    /// retried by timer.
     fn maybe_rearm(&self) {
-        if !self.eager || self.rearm_window.is_zero() || self.typing.get() {
+        if !self.eager || self.rearm == Rearm::Never || !self.parked_for_shown_user() {
             return;
         }
+        if !(self.hooks.seat_active)() {
+            return self.wait_for_seat();
+        }
         let cycled = match &*self.phase.borrow() {
-            Phase::Conversing {
-                passive: true, awaiting_input: true, saw_info, started, ..
-            } => *saw_info && started.elapsed() >= REARM_SPIN_GUARD,
+            Phase::Conversing { saw_info, started, .. } => {
+                *saw_info && started.elapsed() >= REARM_SPIN_GUARD
+            }
             _ => false,
         };
-        if cycled
-            && self.parked_for_shown_user()
-            && self.last_activity.get().elapsed() <= self.rearm_window
-        {
-            self.restart();
+        if !cycled {
+            return self.schedule_retry(false);
         }
+        self.quick_ends.set(0);
+        let attentive = match self.rearm {
+            Rearm::Never => false,
+            Rearm::Window(seconds) => {
+                self.last_activity.get().elapsed() <= Duration::from_secs(seconds)
+            }
+            Rearm::Always => true,
+        };
+        if attentive {
+            self.restart_unless_typing();
+        }
+    }
+
+    fn restart_unless_typing(&self) {
+        if !self.typing() {
+            return self.restart();
+        }
+        let held = self.typing_hold.get().saturating_sub(self.last_activity.get().elapsed());
+        // Floored: a zero delay re-entering here would spin the main loop.
+        self.resume_after(held.max(Duration::from_millis(100)));
+    }
+
+    /// `failed`: the conversation ended in an error rather than a park.
+    fn retry_delay(&self, ended: u32, failed: bool) -> Duration {
+        // "always" already spends a worker per pam_fprintd timeout; backing
+        // a busy reader off further would only leave touches unanswered.
+        let cap = if self.rearm == Rearm::Always && !failed {
+            self.retry_base.get() * 2
+        } else {
+            self.retry_cap.get()
+        };
+        self.retry_base.get().saturating_mul(1 << ended.min(16)).min(cap)
+    }
+
+    fn schedule_retry(&self, failed: bool) {
+        let ended = self.quick_ends.get();
+        if !self.eager
+            || self.rearm == Rearm::Never
+            || (self.rearm != Rearm::Always && ended >= RETRY_LIMIT)
+        {
+            return;
+        }
+        self.quick_ends.set(ended + 1);
+        self.resume_after(self.retry_delay(ended, failed));
+    }
+
+    fn resume_after(&self, delay: Duration) {
+        let (me, token) = (self.me.clone(), self.retry_token.get());
+        // A future rather than timeout_add_local: that one always lands on
+        // the global default context, this follows the thread's own.
+        glib::spawn_future_local(async move {
+            glib::timeout_future(delay).await;
+            if let Some(auth) = me.upgrade() {
+                if token == auth.retry_token.get() {
+                    auth.resume();
+                }
+            }
+        });
+    }
+
+    /// Picks up where a timer or an off-screen spell left things.
+    fn resume(&self) {
+        if !(self.hooks.seat_active)() {
+            return self.wait_for_seat();
+        }
+        if self.pending_rearm.get() {
+            if matches!(*self.phase.borrow(), Phase::Idle) {
+                self.last_restart.set(Some(Instant::now()));
+                self.start_eager(&(self.hooks.current_username)());
+            }
+        } else if self.parked_for_shown_user() {
+            self.restart_unless_typing();
+        }
+    }
+
+    fn wait_for_seat(&self) {
+        if self.seat_waiting.replace(true) {
+            return;
+        }
+        let me = self.me.clone();
+        glib::spawn_future_local(async move {
+            loop {
+                let Some(poll) = me.upgrade().map(|auth| auth.seat_poll.get()) else { return };
+                glib::timeout_future(poll).await;
+                let Some(auth) = me.upgrade() else { return };
+                if (auth.hooks.seat_active)() {
+                    auth.seat_waiting.set(false);
+                    return auth.resume();
+                }
+            }
+        });
     }
 
     fn restart(&self) {
@@ -326,6 +469,7 @@ impl Auth {
 
     fn open(&self, user: String, stash: Option<String>, passive: bool) {
         self.pending_rearm.set(false);
+        self.retry_token.set(self.retry_token.get() + 1);
         *self.phase.borrow_mut() = Phase::Conversing {
             user: user.clone(),
             stash,
@@ -387,6 +531,7 @@ impl Auth {
                     // Failed on its own (pam_nologin): nothing typed to reset.
                     self.bus.emit(&UiEvent::PamError(text));
                 }
+                self.schedule_retry(true);
             }
         }
     }
@@ -441,7 +586,7 @@ impl Auth {
         let phase = std::mem::replace(&mut *self.phase.borrow_mut(), Phase::Idle);
         match phase {
             Phase::Conversing { user, passive, .. } => {
-                let shown = (self.current_username)();
+                let shown = (self.hooks.current_username)();
                 if user != shown {
                     // Authenticated while the username was being edited:
                     // that session is not what the screen asks for.
@@ -455,7 +600,15 @@ impl Auth {
                     self.start_eager(&shown);
                     return;
                 }
-                let (cmd, env) = (self.resolve_start)(&user);
+                if passive && !(self.hooks.seat_active)() {
+                    // A match on a VT nobody looks at: starting the session
+                    // would pull the screen over to it.
+                    self.abandon_conversation();
+                    self.bus.emit(&UiEvent::Info(String::new()));
+                    self.pending_rearm.set(true);
+                    return self.wait_for_seat();
+                }
+                let (cmd, env) = (self.hooks.resolve_start)(&user);
                 info!("authenticated; starting session: {}", cmd.join(" "));
                 *self.phase.borrow_mut() = Phase::Starting;
                 self.bus.emit(&UiEvent::Busy(true));
@@ -466,7 +619,7 @@ impl Auth {
                     self.bus.emit(&UiEvent::Info("demo: session would start now".into()));
                     self.bus.emit(&UiEvent::Busy(false));
                 } else {
-                    (self.on_started)();
+                    (self.hooks.on_started)();
                 }
             }
             Phase::Idle => {}
@@ -480,6 +633,24 @@ impl Auth {
             return;
         }
         std::process::exit(2);
+    }
+
+    #[cfg(test)]
+    fn set_retry(&self, base: Duration, cap: Duration) {
+        self.retry_base.set(base);
+        self.retry_cap.set(cap);
+    }
+
+    #[cfg(test)]
+    fn set_pauses(&self, typing_hold: Duration, seat_poll: Duration) {
+        self.typing_hold.set(typing_hold);
+        self.seat_poll.set(seat_poll);
+    }
+
+    /// Input that reaches nothing but the activity clock.
+    #[cfg(test)]
+    fn touch_activity_clock(&self) {
+        self.last_activity.set(Instant::now());
     }
 
     /// Ages the running conversation and the last activity, so tests reach
@@ -512,6 +683,12 @@ mod tests {
 
     thread_local! {
         static SHOWN: RefCell<String> = const { RefCell::new(String::new()) };
+        static ON_SCREEN: Cell<bool> = const { Cell::new(true) };
+    }
+
+    /// Whether the greeter's VT is the one on screen.
+    fn on_screen(active: bool) {
+        ON_SCREEN.with(|seat| seat.set(active));
     }
 
     /// What the username entry shows.
@@ -527,6 +704,7 @@ mod tests {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         show("edraven");
+        on_screen(true);
         let acquired = context.with_thread_default(|| {
             let bus = Rc::new(Bus::default());
             let sink = log.clone();
@@ -548,9 +726,12 @@ mod tests {
                 bus,
                 true,
                 &options,
-                Box::new(|| SHOWN.with(|shown| shown.borrow().clone())),
-                Box::new(|_| (vec!["true".into()], vec![])),
-                Box::new(|| panic!("demo must never hand off a session")),
+                Hooks {
+                    current_username: Box::new(|| SHOWN.with(|shown| shown.borrow().clone())),
+                    resolve_start: Box::new(|_| (vec!["true".into()], vec![])),
+                    on_started: Box::new(|| panic!("demo must never hand off a session")),
+                    seat_active: Box::new(|| ON_SCREEN.with(|seat| seat.get())),
+                },
             );
             let pump = || {
                 for _ in 0..50 {
@@ -573,7 +754,28 @@ mod tests {
     }
 
     fn eager(rearm_window: u64) -> config::Auth {
+        let rearm_window =
+            if rearm_window == 0 { Rearm::Never } else { Rearm::Window(rearm_window) };
         config::Auth { eager: true, rearm_window }
+    }
+
+    fn eager_always() -> config::Auth {
+        config::Auth { eager: true, rearm_window: Rearm::Always }
+    }
+
+    /// Pumps until `done` holds, for at most two seconds.
+    fn pump_until(pump: &dyn Fn(), done: impl Fn() -> bool) -> bool {
+        for _ in 0..40 {
+            if done() {
+                return true;
+            }
+            pump();
+        }
+        done()
+    }
+
+    fn creates(seen: &Seen) -> usize {
+        requests(seen).iter().filter(|r| r.starts_with("create")).count()
     }
 
     type Seen = Arc<Mutex<Vec<String>>>;
@@ -672,6 +874,24 @@ mod tests {
             "busy true",
             "info Place your right thumb on the fingerprint reader",
             "info Verification timed out",
+            "busy true",
+            "info demo: session would start now",
+            "busy false",
+        ];
+        assert_eq!(log, expected);
+    }
+
+    #[test]
+    fn a_touch_logs_in_with_nothing_pressed() {
+        let backend = DemoBackend::with_fingerprint_wait(Duration::from_millis(20));
+        let log = drive_with(Box::new(backend), eager_always(), |auth, pump| {
+            show("touch");
+            auth.start_eager("touch");
+            pump();
+            pump();
+        });
+        let expected = [
+            "info Place your right thumb on the fingerprint reader",
             "busy true",
             "info demo: session would start now",
             "busy false",
@@ -829,9 +1049,195 @@ mod tests {
     }
 
     #[test]
-    fn instant_park_without_info_never_restarts() {
+    fn an_instant_park_is_not_restarted_at_once() {
         let seen = rearm_scenario(password_only, eager(10), Duration::from_secs(2));
         assert_eq!(seen, ["create edraven"]);
+    }
+
+    #[test]
+    fn always_rearms_however_old_the_last_input_is() {
+        let seen = rearm_scenario(fprint, eager_always(), Duration::from_secs(3600));
+        let cycle = ["create edraven", "respond None", "respond None"];
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(seen, expected);
+    }
+
+    const FAST: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn an_instant_park_is_retried_by_timer_up_to_the_limit() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager(10), |auth, pump| {
+            auth.set_retry(FAST, FAST * 4);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
+            pump();
+            pump();
+        });
+        assert_eq!(creates(&seen), 1 + RETRY_LIMIT as usize, "{:?}", requests(&seen));
+    }
+
+    #[test]
+    fn always_keeps_retrying_an_instant_park() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST * 2);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) >= 8), "{:?}", requests(&seen));
+        });
+    }
+
+    #[test]
+    fn without_rearm_no_timer_ever_reopens() {
+        let (backend, seen, _) = scripted(|_| vec![Step::Fail("nologin")]);
+        drive_with(backend, eager(0), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            pump();
+        });
+        assert_eq!(requests(&seen), ["create edraven", "cancel"]);
+    }
+
+    #[test]
+    fn a_failed_login_rearms_by_timer_without_any_input() {
+        let (backend, seen, gate) = scripted(fprint_gated);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("fail".into());
+            gate.release();
+            assert!(pump_until(pump, || creates(&seen) >= 2), "{:?}", requests(&seen));
+            gate.release();
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond Some(\"fail\")",
+            "cancel",
+            "create edraven",
+        ];
+        assert_eq!(requests(&seen)[..expected.len()], expected);
+        assert!(log.contains(&"autherror wrong password".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn text_left_in_the_entry_holds_the_prompt_only_for_a_while() {
+        let (backend, seen, _) = scripted(fprint);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_pauses(Duration::from_millis(150), FAST);
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            auth.touch_activity_clock();
+            auth.set_typing(true);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+        });
+        let cycle = ["create edraven", "respond None", "respond None"];
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(requests(&seen), expected);
+    }
+
+    #[test]
+    fn nothing_is_armed_on_a_vt_nobody_looks_at() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_pauses(TYPING_HOLD, FAST);
+            auth.set_retry(Duration::from_secs(60), Duration::from_secs(60));
+            on_screen(false);
+            auth.start_eager("edraven");
+            pump();
+            assert!(requests(&seen).is_empty(), "{:?}", requests(&seen));
+            on_screen(true);
+            assert!(pump_until(pump, || creates(&seen) == 1), "{:?}", requests(&seen));
+        });
+        assert_eq!(requests(&seen), ["create edraven"]);
+    }
+
+    #[test]
+    fn a_parked_prompt_is_not_restarted_while_off_screen() {
+        let (backend, seen, _) = scripted(fprint);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_pauses(TYPING_HOLD, FAST);
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            on_screen(false);
+            pump();
+            pump();
+            assert_eq!(requests(&seen), ["create edraven", "respond None", "respond None"]);
+            on_screen(true);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+        });
+    }
+
+    #[test]
+    fn a_match_on_a_vt_nobody_looks_at_starts_nothing() {
+        let (backend, seen, gate) =
+            scripted(|_| vec![Step::Msg(Info, "Place your finger"), Step::Wait]);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_pauses(TYPING_HOLD, FAST);
+            auth.start_eager("edraven");
+            pump();
+            on_screen(false);
+            gate.release();
+            pump();
+            pump();
+            assert_eq!(requests(&seen), ["create edraven", "respond None", "cancel"]);
+            on_screen(true);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            gate.release();
+            pump();
+        });
+        assert!(log.iter().filter(|e| e.contains("would start")).count() == 1, "{log:?}");
+    }
+
+    #[test]
+    fn retry_delays_double_up_to_a_cap_that_always_keeps_short() {
+        let secs = Duration::from_secs;
+        drive_with(Box::new(DemoBackend::new()), eager(10), |auth, _| {
+            let delays: Vec<_> = (0..6).map(|n| auth.retry_delay(n, false)).collect();
+            assert_eq!(delays, [secs(3), secs(6), secs(12), secs(24), secs(48), secs(60)]);
+        });
+        drive_with(Box::new(DemoBackend::new()), eager_always(), |auth, _| {
+            let delays: Vec<_> = (0..4).map(|n| auth.retry_delay(n, false)).collect();
+            assert_eq!(delays, [secs(3), secs(6), secs(6), secs(6)]);
+            assert_eq!(auth.retry_delay(9, true), secs(60));
+        });
+    }
+
+    #[test]
+    fn input_gives_the_timer_retries_their_budget_back() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager(10), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 1 + RETRY_LIMIT as usize));
+            pump();
+            assert_eq!(auth.quick_ends.get(), RETRY_LIMIT);
+            auth.note_activity();
+            assert_eq!(auth.quick_ends.get(), 0);
+        });
+    }
+
+    #[test]
+    fn a_retry_timer_armed_before_a_reopen_is_stale() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager(10), |auth, pump| {
+            let armed = Instant::now();
+            auth.set_retry(Duration::from_millis(600), Duration::from_millis(600));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+            // The reopen's own retry must stay out of the picture.
+            auth.set_retry(Duration::from_secs(60), Duration::from_secs(60));
+            auth.note_activity();
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            while armed.elapsed() < Duration::from_millis(900) {
+                pump();
+            }
+        });
+        assert_eq!(requests(&seen), ["create edraven", "cancel", "create edraven"]);
     }
 
     #[test]

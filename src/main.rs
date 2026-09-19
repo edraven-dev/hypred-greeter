@@ -9,6 +9,7 @@ mod cli;
 mod log;
 mod config;
 mod layout;
+mod seat;
 mod sessions;
 mod state;
 mod ui;
@@ -82,7 +83,13 @@ fn main() {
             .clone()
             .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
             .unwrap_or_default();
-        let shared = ui::ctx::Shared::new(initial_username, session_list, saved);
+        let default_session = loaded.config.sessions.default.as_deref();
+        if let Some(id) = default_session {
+            if !session_list.iter().any(|s| s.matches_cache_id(id)) {
+                problems.push(format!("sessions.default `{id}` matches no installed session"));
+            }
+        }
+        let shared = ui::ctx::Shared::new(initial_username, session_list, saved, default_session);
 
         let bus = Rc::new(ui::bus::Bus::default());
         let gtk_app = app.downgrade();
@@ -95,33 +102,36 @@ fn main() {
             bus.clone(),
             args.demo,
             &loaded.config.auth,
-            Box::new(move || current.username.borrow().clone()),
-            Box::new(move |username: &str| {
-                {
-                    let mut state = resolver.state.borrow_mut();
-                    state.last_user = Some(username.to_string());
-                    if let Some(session) = resolver.selected() {
-                        state.last_session.insert(username.to_string(), session.cache_id());
+            auth::Hooks {
+                current_username: Box::new(move || current.username.borrow().clone()),
+                resolve_start: Box::new(move |username: &str| {
+                    {
+                        let mut state = resolver.state.borrow_mut();
+                        state.last_user = Some(username.to_string());
+                        if let Some(session) = resolver.selected() {
+                            state.last_session.insert(username.to_string(), session.cache_id());
+                        }
+                        if !demo {
+                            state::save(&state);
+                        }
                     }
-                    if !demo {
-                        state::save(&state);
+                    match resolver.selected() {
+                        Some(session) => {
+                            sessions::start_command(session, &resolver_config.config.sessions)
+                        }
+                        None => (Vec::new(), Vec::new()),
                     }
-                }
-                match resolver.selected() {
-                    Some(session) => {
-                        sessions::start_command(session, &resolver_config.config.sessions)
+                }),
+                on_started: Box::new(move || {
+                    log::info!("session handed to greetd; exiting");
+                    if let Some(app) = gtk_app.upgrade() {
+                        app.quit();
+                    } else {
+                        std::process::exit(0);
                     }
-                    None => (Vec::new(), Vec::new()),
-                }
-            }),
-            Box::new(move || {
-                log::info!("session handed to greetd; exiting");
-                if let Some(app) = gtk_app.upgrade() {
-                    app.quit();
-                } else {
-                    std::process::exit(0);
-                }
-            }),
+                }),
+                seat_active: if demo { Box::new(|| true) } else { Box::new(seat::active) },
+            },
         );
 
         let handle = ui::ctx::AppHandle::new(auth, bus, shared);

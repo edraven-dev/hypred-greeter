@@ -47,8 +47,8 @@ impl Backend for GreetdBackend {
 
 /// Accepts any password except "fail"; username "mfa" walks the
 /// visible-prompt + info path, "fprint" a fingerprint cycle whose first
-/// info ack blocks like greetd does while pam_fprintd waits. Never starts
-/// anything.
+/// info ack blocks like greetd does while pam_fprintd waits and then times
+/// out, "touch" the same cycle ending in a match. Never starts anything.
 pub struct DemoBackend {
     script: Vec<(AuthMessageType, String)>,
     fingerprint_wait: Duration,
@@ -94,9 +94,13 @@ impl Backend for DemoBackend {
                             "Place your right thumb on the fingerprint reader".into(),
                         ),
                     ],
+                    "touch" => vec![(
+                        AuthMessageType::Info,
+                        "Place your right thumb on the fingerprint reader".into(),
+                    )],
                     _ => vec![(AuthMessageType::Secret, "Password:".into())],
                 };
-                self.wait_on_ack = username == "fprint";
+                self.wait_on_ack = matches!(username.as_str(), "fprint" | "touch");
                 self.next()
             }
             Request::PostAuthMessageResponse { response } => {

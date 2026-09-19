@@ -15,6 +15,7 @@ pub struct Shared {
     pub sessions: Vec<crate::sessions::Session>,
     pub selected_session: Cell<usize>,
     pub state: RefCell<crate::state::State>,
+    default_session: Option<usize>,
 }
 
 impl Shared {
@@ -22,16 +23,24 @@ impl Shared {
         initial_username: String,
         sessions: Vec<crate::sessions::Session>,
         state: crate::state::State,
+        default_session: Option<&str>,
     ) -> Rc<Self> {
+        let default_session =
+            default_session.and_then(|id| sessions.iter().position(|s| s.matches_cache_id(id)));
         let shared = Self {
             username: RefCell::new(initial_username),
             sessions,
             selected_session: Cell::new(0),
             state: RefCell::new(state),
+            default_session,
         };
-        let initial = shared.remembered_session().unwrap_or(0);
-        shared.selected_session.set(initial);
+        shared.selected_session.set(shared.preselected_session().unwrap_or(0));
         Rc::new(shared)
+    }
+
+    /// The user's remembered session, else the configured default.
+    pub fn preselected_session(&self) -> Option<usize> {
+        self.remembered_session().or(self.default_session)
     }
 
     pub fn selected(&self) -> Option<&crate::sessions::Session> {
@@ -64,7 +73,7 @@ impl AppHandle {
 
     pub fn set_username(&self, username: &str) {
         *self.shared.username.borrow_mut() = username.to_string();
-        if let Some(index) = self.shared.remembered_session() {
+        if let Some(index) = self.shared.preselected_session() {
             if index != self.shared.selected_session.get() {
                 self.shared.selected_session.set(index);
                 self.bus.emit(&UiEvent::SessionChanged(index));
@@ -151,5 +160,44 @@ impl<'a> BuildCtx<'a> {
 
     pub fn take_problems(&self) -> Vec<String> {
         self.problems.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::{Kind, Session};
+    use crate::state::State;
+
+    fn session(name: &str, stem: &str) -> Session {
+        Session {
+            name: name.into(),
+            exec: vec![stem.into()],
+            kind: Kind::Wayland,
+            stem: stem.into(),
+            desktop_names: None,
+        }
+    }
+
+    fn sessions() -> Vec<Session> {
+        vec![session("Hyprland", "hyprland"), session("Hyprland (uwsm-managed)", "hyprland-uwsm")]
+    }
+
+    #[test]
+    fn nothing_remembered_preselects_the_configured_default() {
+        let default = Some("wayland/hyprland-uwsm");
+        let shared = Shared::new("edraven".into(), sessions(), State::default(), default);
+        assert_eq!(shared.selected_session.get(), 1);
+        let shared = Shared::new("edraven".into(), sessions(), State::default(), None);
+        assert_eq!(shared.selected_session.get(), 0);
+    }
+
+    #[test]
+    fn a_remembered_session_beats_the_default() {
+        let mut state = State::default();
+        state.last_session.insert("edraven".into(), "wayland/hyprland".into());
+        let default = Some("wayland/hyprland-uwsm");
+        let shared = Shared::new("edraven".into(), sessions(), state, default);
+        assert_eq!(shared.selected_session.get(), 0);
     }
 }
