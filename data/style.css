@@ -64,9 +64,17 @@ dropdown.hg-session > button {
   border-radius: 8px;
 }
 
+/* they float over whatever the background is — give them a body of their own */
 .hg-power button {
-  background-color: alpha(@muted, 0.2);
+  background-image: none;
+  box-shadow: none;
+  background-color: alpha(#000000, 0.55);
+  color: @fg;
+  border: 1px solid alpha(@muted, 0.6);
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 6px 12px;
 }
-.hg-power button:hover { background-color: alpha(@danger, 0.3); }
+.hg-power button:hover {
+  background-color: alpha(@danger, 0.3);
+  border-color: @danger;
+}

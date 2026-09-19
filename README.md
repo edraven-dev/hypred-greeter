@@ -100,7 +100,8 @@ anchor = "center"
 or array, extra CSS classes), `halign`/`valign` (`start`/`center`/`end`/
 `fill`), `anchor` (sugar for both: `center`, `top`, `bottom-right`, ...),
 `hexpand`/`vexpand`, `margin` (int or `[top, right, bottom, left]`),
-`width`/`height`, `visible`.
+`width`/`height` (pixels, or a share of the window such as `"26%"` — a card
+that keeps its width whatever the message says), `visible`.
 
 **Widgets:**
 
@@ -109,12 +110,12 @@ or array, extra CSS classes), `halign`/`valign` (`start`/`center`/`end`/
 | `box` | `orientation`, `spacing`, `homogeneous` | container |
 | `overlay` | — | container; children after the first float, placed by `anchor` |
 | `grid` | `row-spacing`, `column-spacing`; children take `col`, `row`, `col-span`, `row-span` | container |
-| `label` | `text`, `wrap` | static text |
+| `label` | `text`, `wrap`, `max-width-chars` | static text; a wrapping label asks for its one-line width unless capped |
 | `background` | `image`, `fit` | wallpaper; defaults from `[background]` |
 | `clock` | `format` (strftime) | ticks every second |
 | `username` | `placeholder` | prefilled with the last user |
 | `password` | `placeholder`, `peek` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
-| `message` | `text` | PAM info/errors land here; info is shown after a 250 ms settle |
+| `message` | `text`, `max-width-chars` (30) | PAM info/errors land here, wrapped to the container's width; info is shown after a 250 ms settle |
 | `session` | — | dropdown over wayland-sessions + xsessions |
 | `power` | `reboot-label`, `poweroff-label`, `spacing` | runs `[commands]` |
 

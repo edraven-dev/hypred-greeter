@@ -1,6 +1,7 @@
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
+use crate::layout::node::Size;
 use crate::layout::Node;
 use crate::ui::ctx::BuildCtx;
 use crate::widgets::WidgetError;
@@ -75,8 +76,44 @@ fn apply_common(widget: &gtk::Widget, node: &Node) {
         widget.set_margin_bottom(bottom);
         widget.set_margin_start(left);
     }
-    widget.set_size_request(common.width.unwrap_or(-1), common.height.unwrap_or(-1));
+    request_size(widget, common.width, common.height, (0, 0));
+    let relative = |size| matches!(size, Some(Size::Percent(_)));
+    if relative(common.width) || relative(common.height) {
+        follow_window(widget, common.width, common.height);
+    }
     if let Some(visible) = common.visible {
         widget.set_visible(visible);
     }
+}
+
+fn request_size(
+    widget: &gtk::Widget,
+    width: Option<Size>,
+    height: Option<Size>,
+    window: (i32, i32),
+) {
+    let px = |size: Option<Size>, of: i32| match size {
+        // Until the window has a size a share of it requests nothing.
+        Some(Size::Percent(_)) if of <= 0 => -1,
+        Some(size) => size.request(of),
+        None => -1,
+    };
+    widget.set_size_request(px(width, window.0), px(height, window.1));
+}
+
+/// Keeps a "25%" request in step with the window: GTK has no relative
+/// sizes, so the toplevel surface's size is followed instead.
+fn follow_window(widget: &gtk::Widget, width: Option<Size>, height: Option<Size>) {
+    widget.connect_realize(move |widget| {
+        let Some(surface) = widget.native().and_then(|native| native.surface()) else { return };
+        let weak = widget.downgrade();
+        let apply = move |surface: &gtk::gdk::Surface| {
+            if let Some(widget) = weak.upgrade() {
+                request_size(&widget, width, height, (surface.width(), surface.height()));
+            }
+        };
+        apply(&surface);
+        surface.connect_width_notify(apply.clone());
+        surface.connect_height_notify(apply);
+    });
 }

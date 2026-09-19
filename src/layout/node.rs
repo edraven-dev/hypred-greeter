@@ -14,6 +14,32 @@ pub struct Node {
     pub path: String,
 }
 
+/// Pixels, or a share of the window ("25%") — GTK has no relative sizes,
+/// the builder keeps such a request in step with the window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Size {
+    Px(i32),
+    Percent(f64),
+}
+
+impl Size {
+    pub fn parse(value: &toml::Value) -> Option<Self> {
+        if let Some(n) = value.as_integer() {
+            return i32::try_from(n).ok().map(Size::Px);
+        }
+        let share: f64 = value.as_str()?.strip_suffix('%')?.trim().parse().ok()?;
+        (share > 0.0 && share <= 100.0).then_some(Size::Percent(share))
+    }
+
+    /// The request in pixels, given the window's extent along that axis.
+    pub fn request(self, window: i32) -> i32 {
+        match self {
+            Size::Px(n) => n,
+            Size::Percent(share) => (f64::from(window) * share / 100.0).round() as i32,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Common {
     pub halign: Option<Align>,
@@ -22,8 +48,8 @@ pub struct Common {
     pub vexpand: Option<bool>,
     /// [top, right, bottom, left]
     pub margin: Option<[i32; 4]>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
+    pub width: Option<Size>,
+    pub height: Option<Size>,
     pub visible: Option<bool>,
 }
 
