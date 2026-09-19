@@ -35,7 +35,16 @@ impl WidgetDef for MessageDef {
     }
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-        let label = gtk::Label::builder().label(node.props.str_or("text", "")?).wrap(true).build();
+        // A wrapping label still asks for its one-line width unless capped:
+        // uncapped, every long PAM text widened the card around it. Capped,
+        // it wraps to whatever width its container gives it.
+        let label = gtk::Label::builder()
+            .label(node.props.str_or("text", "")?)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(node.props.int("max-width-chars")?.unwrap_or(30) as i32)
+            .justify(gtk::Justification::Center)
+            .build();
 
         let weak = label.downgrade();
         let latest = Rc::new(Cell::new(0u64));

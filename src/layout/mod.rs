@@ -3,7 +3,7 @@ pub mod node;
 
 pub use node::{Node, Props};
 
-use node::Common;
+use node::{Common, Size};
 use std::path::Path;
 
 pub const DEFAULT_LAYOUT: &str = include_str!("../../data/layout.toml");
@@ -190,9 +190,9 @@ fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>)
     }
     for (key, slot) in [("width", &mut common.width), ("height", &mut common.height)] {
         if let Some(value) = table.remove(key) {
-            match to_i32(&value) {
-                Some(n) => *slot = Some(n),
-                None => bad(key, "an integer"),
+            match Size::parse(&value) {
+                Some(size) => *slot = Some(size),
+                None => bad(key, "an integer or a share of the window like \"25%\""),
             }
         }
     }
@@ -220,6 +220,30 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert!(contains_kind(&root, "password"), "default layout must allow login");
         assert!(contains_kind(&root, "background"));
+    }
+
+    #[test]
+    fn sizes_are_pixels_or_a_share_of_the_window() {
+        let mut problems = Vec::new();
+        let text = "[root]\nwidget = \"box\"\nwidth = \"26%\"\nheight = 120\n";
+        let root = parse_str(text, &mut problems).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(root.common.width, Some(Size::Percent(26.0)));
+        assert_eq!(root.common.height, Some(Size::Px(120)));
+        assert_eq!(Size::Percent(26.0).request(1800), 468);
+        assert_eq!(Size::Px(120).request(1800), 120);
+    }
+
+    #[test]
+    fn a_bad_size_is_a_problem_not_a_request() {
+        for bad in ["\"0%\"", "\"140%\"", "\"wide\"", "\"26\"", "2.5"] {
+            let mut problems = Vec::new();
+            let text = format!("[root]\nwidget = \"box\"\nwidth = {bad}\n");
+            let root = parse_str(&text, &mut problems).unwrap();
+            assert_eq!(root.common.width, None, "{bad}");
+            assert_eq!(problems.len(), 1, "{bad}: {problems:?}");
+            assert!(problems[0].contains("25%"), "{problems:?}");
+        }
     }
 
     #[test]
