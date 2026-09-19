@@ -157,6 +157,7 @@ fn main() {
         } else {
             window.fullscreen();
         }
+        ui::publish_viewport(&window);
         window.present();
 
         // Capture phase: sees every key/pointer event before a child can

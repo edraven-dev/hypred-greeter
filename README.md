@@ -144,6 +144,20 @@ GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
 Parse errors are logged with file:line:col and skipped, never fatal.
 
+**Sizes relative to the screen.** GTK CSS has no `%`/`vw` units for sizes,
+so the greeter publishes the window's size as custom properties on
+`window.hg-window` and keeps them current: `--hg-vw` and `--hg-vh` (1 % of
+the window's width and height, in px), `--hg-vmin`, `--hg-vmax`. Anything
+can be sized or spaced from them with `calc()`:
+
+```css
+#card     { min-width: calc(var(--hg-vw) * 25); }   /* a quarter of the screen */
+.hg-clock { margin-top: calc(var(--hg-vh) * 8); font-size: calc(var(--hg-vmin) * 4); }
+```
+
+(`width`/`height` in layout.toml take `"25%"` too, for layouts that would
+rather not touch CSS.)
+
 ## Writing a widget (addons)
 
 Implement `WidgetDef` (`src/widgets/`), register it in
