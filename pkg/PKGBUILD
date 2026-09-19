@@ -1,5 +1,5 @@
 # Maintainer: edraven <edraven.dev@gmail.com>
-# Release PKGBUILD — reference copy; the AUR repo carries the live one.
+# Release PKGBUILD (pinned tag) — build with makepkg from a clone; not on the AUR.
 pkgname=hypred-greeter
 pkgver=0.1.0
 pkgrel=1

@@ -19,9 +19,14 @@ impl WidgetDef for UsernameDef {
             .build();
 
         let app = ctx.app.clone();
-        entry.connect_changed(move |entry| app.set_username(&entry.text()));
-        entry.connect_activate(|entry| {
+        entry.connect_changed(move |entry| {
+            app.set_username(&entry.text());
+            app.username_edited();
+        });
+        let app = ctx.app.clone();
+        entry.connect_activate(move |entry| {
             entry.emit_move_focus(gtk::DirectionType::TabForward);
+            app.auth.start_eager(&app.username());
         });
         Ok(entry.upcast())
     }

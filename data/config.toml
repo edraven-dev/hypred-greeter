@@ -20,6 +20,22 @@ fit = "cover"              # cover | contain | fill | scale-down
 # cursor-theme = "Adwaita"
 # font = "Cantarell 14"
 
+[auth]
+# Open the PAM conversation as soon as a username is known (the remembered
+# user at startup, or when the username entry settles) instead of at the
+# first password submit. With pam_fprintd ahead of the password modules this
+# arms the fingerprint reader the moment the greeter appears. Eager
+# conversations get cancelled (restarts, username changes) — carry the PAM
+# stack from README "Fingerprint" before enabling, or faillock counts each
+# cancel as a failed login.
+eager = false
+# When a conversation parked at the password prompt is restarted so the
+# reader re-arms (pam_fprintd gives up after its timeout; only a fresh
+# conversation arms it again): "always" — after every timed-out cycle, so a
+# touch logs in whenever you walk up; N — for N seconds after the last
+# input, then on the next input; 0 — never.
+rearm-window = 0
+
 [commands]
 reboot = ["systemctl", "reboot"]
 poweroff = ["systemctl", "poweroff"]
@@ -29,3 +45,6 @@ poweroff = ["systemctl", "poweroff"]
 x11-prefix = ["startx", "/usr/bin/env"]
 # Extra KEY=value pairs handed to greetd's start_session.
 # env = ["XCURSOR_SIZE=24"]
+# Preselected for a user with no session remembered yet (else the first by
+# name): "<wayland|x11>/<desktop file stem>".
+# default = "wayland/hyprland-uwsm"

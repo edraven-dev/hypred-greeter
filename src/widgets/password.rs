@@ -1,5 +1,8 @@
 //! Visible (non-secret) PAM prompts are answered here too, masked; their
-//! prompt text shows via the message widget.
+//! prompt text shows via the message widget. A mid-conversation PAM error
+//! ("Failed to match fingerprint") leaves the entry alone — only a failed
+//! conversation wipes it. While the entry holds text, auth keeps a parked
+//! prompt ready for it instead of re-arming the fingerprint reader.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
@@ -24,8 +27,14 @@ impl WidgetDef for PasswordDef {
             .build();
 
         let app = ctx.app.clone();
+        entry.connect_changed(move |entry| app.auth.set_typing(!entry.text().is_empty()));
+
+        let app = ctx.app.clone();
         entry.connect_activate(move |entry| {
             let text = entry.text().to_string();
+            if text.is_empty() {
+                return;
+            }
             entry.set_text("");
             app.submit_response(&text);
         });
@@ -35,10 +44,14 @@ impl WidgetDef for PasswordDef {
         });
 
         let app = ctx.app.clone();
+        let weak = entry.downgrade();
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(move |_, keyval, _, _| {
             if keyval == gtk::gdk::Key::Escape {
                 app.auth.cancel();
+                if let Some(entry) = weak.upgrade() {
+                    entry.set_text("");
+                }
                 gtk::glib::Propagation::Stop
             } else {
                 gtk::glib::Propagation::Proceed
@@ -50,15 +63,28 @@ impl WidgetDef for PasswordDef {
         ctx.bus.subscribe(move |event| {
             let Some(entry) = weak.upgrade() else { return };
             match event {
-                UiEvent::Busy(busy) => entry.set_sensitive(!busy),
+                // Read-only rather than insensitive: an insensitive entry
+                // drops focus and ignores keys, so Escape could not take back
+                // a password held for a fingerprint wait.
+                UiEvent::Busy(busy) => {
+                    entry.set_editable(!busy);
+                    if *busy {
+                        entry.add_css_class("hg-password-busy");
+                    } else {
+                        entry.remove_css_class("hg-password-busy");
+                    }
+                }
                 UiEvent::AuthError(_) => {
                     entry.set_text("");
                     entry.grab_focus();
                 }
-                UiEvent::Prompt { .. } => {
+                UiEvent::Prompt { passive: false, .. } => {
                     entry.grab_focus();
                 }
-                UiEvent::Info(_) | UiEvent::SessionChanged(_) => {}
+                UiEvent::Prompt { passive: true, .. }
+                | UiEvent::Info(_)
+                | UiEvent::PamError(_)
+                | UiEvent::SessionChanged(_) => {}
             }
         });
         Ok(entry.upcast())

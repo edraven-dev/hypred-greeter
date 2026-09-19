@@ -3,8 +3,20 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
-    Prompt { secret: bool, text: String },
+    /// `passive`: raised by a conversation the greeter opened on its own
+    /// (eager mode) with nothing submitted — widgets must not move focus or
+    /// wipe what is shown.
+    Prompt {
+        secret: bool,
+        text: String,
+        passive: bool,
+    },
+    /// Empty text: a conversation was dropped, clear what it said.
     Info(String),
+    /// A PAM error message mid-conversation ("Failed to match
+    /// fingerprint"); the conversation goes on.
+    PamError(String),
+    /// The conversation is over and failed.
     AuthError(String),
     Busy(bool),
     SessionChanged(usize),

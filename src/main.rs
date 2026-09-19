@@ -9,6 +9,7 @@ mod cli;
 mod log;
 mod config;
 mod layout;
+mod seat;
 mod sessions;
 mod state;
 mod ui;
@@ -82,10 +83,17 @@ fn main() {
             .clone()
             .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
             .unwrap_or_default();
-        let shared = ui::ctx::Shared::new(initial_username, session_list, saved);
+        let default_session = loaded.config.sessions.default.as_deref();
+        if let Some(id) = default_session {
+            if !session_list.iter().any(|s| s.matches_cache_id(id)) {
+                problems.push(format!("sessions.default `{id}` matches no installed session"));
+            }
+        }
+        let shared = ui::ctx::Shared::new(initial_username, session_list, saved, default_session);
 
         let bus = Rc::new(ui::bus::Bus::default());
         let gtk_app = app.downgrade();
+        let current = shared.clone();
         let resolver = shared.clone();
         let resolver_config = loaded.clone();
         let demo = args.demo;
@@ -93,40 +101,49 @@ fn main() {
             backend,
             bus.clone(),
             args.demo,
-            Box::new(move || {
-                let username = resolver.username.borrow().clone();
-                {
-                    let mut state = resolver.state.borrow_mut();
-                    state.last_user = Some(username.clone());
-                    if let Some(session) = resolver.selected() {
-                        state.last_session.insert(username, session.cache_id());
+            &loaded.config.auth,
+            auth::Hooks {
+                current_username: Box::new(move || current.username.borrow().clone()),
+                resolve_start: Box::new(move |username: &str| {
+                    {
+                        let mut state = resolver.state.borrow_mut();
+                        state.last_user = Some(username.to_string());
+                        if let Some(session) = resolver.selected() {
+                            state.last_session.insert(username.to_string(), session.cache_id());
+                        }
+                        if !demo {
+                            state::save(&state);
+                        }
                     }
-                    if !demo {
-                        state::save(&state);
+                    match resolver.selected() {
+                        Some(session) => {
+                            sessions::start_command(session, &resolver_config.config.sessions)
+                        }
+                        None => (Vec::new(), Vec::new()),
                     }
-                }
-                match resolver.selected() {
-                    Some(session) => {
-                        sessions::start_command(session, &resolver_config.config.sessions)
+                }),
+                on_started: Box::new(move || {
+                    log::info!("session handed to greetd; exiting");
+                    if let Some(app) = gtk_app.upgrade() {
+                        app.quit();
+                    } else {
+                        std::process::exit(0);
                     }
-                    None => (Vec::new(), Vec::new()),
-                }
-            }),
-            Box::new(move || {
-                log::info!("session handed to greetd; exiting");
-                if let Some(app) = gtk_app.upgrade() {
-                    app.quit();
-                } else {
-                    std::process::exit(0);
-                }
-            }),
+                }),
+                seat_active: if demo { Box::new(|| true) } else { Box::new(seat::active) },
+            },
         );
 
         let handle = ui::ctx::AppHandle::new(auth, bus, shared);
 
         let registry = widgets::Registry::builtin();
-        let ctx =
-            ui::ctx::BuildCtx::new(&loaded.config, &loaded.base_dir, &registry, handle, args.demo);
+        let ctx = ui::ctx::BuildCtx::new(
+            &loaded.config,
+            &loaded.base_dir,
+            &registry,
+            handle.clone(),
+            args.demo,
+        );
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
 
@@ -141,6 +158,29 @@ fn main() {
             window.fullscreen();
         }
         window.present();
+
+        // Capture phase: sees every key/pointer event before a child can
+        // stop it.
+        let activity = gtk::EventControllerLegacy::new();
+        activity.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let watcher = handle.clone();
+        activity.connect_event(move |_, event| {
+            use gtk::gdk::EventType::{ButtonPress, KeyPress, MotionNotify, TouchBegin};
+            match event.event_type() {
+                // Deferred until the focused entry has handled the key, so
+                // the first keystroke into the password entry already
+                // counts as typing.
+                KeyPress => {
+                    let watcher = watcher.clone();
+                    gtk::glib::idle_add_local_once(move || watcher.note_activity());
+                }
+                MotionNotify | ButtonPress | TouchBegin => watcher.note_activity(),
+                _ => {}
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        window.add_controller(activity);
+        handle.auth.start_eager(&handle.username());
     });
 
     // Empty argv: GApplication would otherwise choke on our own flags.

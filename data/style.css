@@ -54,6 +54,9 @@ entry.hg-password {
   min-width: 220px;
 }
 
+/* a submitted password is on its way — the entry is read-only meanwhile */
+entry.hg-password.hg-password-busy { opacity: 0.55; }
+
 .hg-message { color: @muted; }
 .hg-message.hg-message-error { color: @danger; }
 

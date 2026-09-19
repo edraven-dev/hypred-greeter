@@ -1,6 +1,7 @@
 use greetd_ipc::codec::SyncCodec;
 use greetd_ipc::{AuthMessageType, ErrorType, Request, Response};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 /// Transport-level only; auth failures travel inside `Response::Error`.
 #[derive(Debug)]
@@ -45,14 +46,23 @@ impl Backend for GreetdBackend {
 }
 
 /// Accepts any password except "fail"; username "mfa" walks the
-/// visible-prompt + info path. Never starts anything.
+/// visible-prompt + info path, "fprint" a fingerprint cycle whose first
+/// info ack blocks like greetd does while pam_fprintd waits and then times
+/// out, "touch" the same cycle ending in a match. Never starts anything.
 pub struct DemoBackend {
     script: Vec<(AuthMessageType, String)>,
+    fingerprint_wait: Duration,
+    wait_on_ack: bool,
 }
 
 impl DemoBackend {
     pub fn new() -> Self {
-        Self { script: Vec::new() }
+        Self { script: Vec::new(), fingerprint_wait: Duration::from_secs(3), wait_on_ack: false }
+    }
+
+    #[cfg(test)]
+    pub fn with_fingerprint_wait(fingerprint_wait: Duration) -> Self {
+        Self { fingerprint_wait, ..Self::new() }
     }
 
     fn next(&mut self) -> Response {
@@ -69,19 +79,34 @@ impl Backend for DemoBackend {
     fn roundtrip(&mut self, request: Request) -> Result<Response, BackendError> {
         Ok(match request {
             Request::CreateSession { username } => {
-                self.script = if username == "mfa" {
-                    // Popped back-to-front.
-                    vec![
+                // Popped back-to-front.
+                self.script = match username.as_str() {
+                    "mfa" => vec![
                         (AuthMessageType::Info, "demo: any token accepted".into()),
                         (AuthMessageType::Visible, "Token:".into()),
                         (AuthMessageType::Secret, "Password:".into()),
-                    ]
-                } else {
-                    vec![(AuthMessageType::Secret, "Password:".into())]
+                    ],
+                    "fprint" => vec![
+                        (AuthMessageType::Secret, "Password:".into()),
+                        (AuthMessageType::Info, "Verification timed out".into()),
+                        (
+                            AuthMessageType::Info,
+                            "Place your right thumb on the fingerprint reader".into(),
+                        ),
+                    ],
+                    "touch" => vec![(
+                        AuthMessageType::Info,
+                        "Place your right thumb on the fingerprint reader".into(),
+                    )],
+                    _ => vec![(AuthMessageType::Secret, "Password:".into())],
                 };
+                self.wait_on_ack = matches!(username.as_str(), "fprint" | "touch");
                 self.next()
             }
             Request::PostAuthMessageResponse { response } => {
+                if std::mem::take(&mut self.wait_on_ack) {
+                    std::thread::sleep(self.fingerprint_wait);
+                }
                 if response.as_deref() == Some("fail") {
                     self.script.clear();
                     Response::Error {
@@ -95,9 +120,118 @@ impl Backend for DemoBackend {
             Request::StartSession { .. } => Response::Success,
             Request::CancelSession => {
                 self.script.clear();
+                self.wait_on_ack = false;
                 Response::Success
             }
         })
+    }
+}
+
+/// Records every request and answers CreateSession from a per-user script;
+/// a `Step::Wait` holds that roundtrip open until the test releases the
+/// gate, standing in for greetd's blocking PAM wait.
+#[cfg(test)]
+pub mod scripted {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Condvar, Mutex};
+
+    #[derive(Default)]
+    pub struct Gate(Mutex<u32>, Condvar);
+
+    impl Gate {
+        pub fn release(&self) {
+            *self.0.lock().unwrap() += 1;
+            self.1.notify_all();
+        }
+
+        fn pass(&self) {
+            let mut permits = self.0.lock().unwrap();
+            while *permits == 0 {
+                permits = self.1.wait(permits).unwrap();
+            }
+            *permits -= 1;
+        }
+    }
+
+    pub enum Step {
+        Msg(AuthMessageType, &'static str),
+        Wait,
+        /// The stack fails without asking anything (pam_nologin).
+        Fail(&'static str),
+    }
+
+    pub struct ScriptedBackend {
+        script: fn(&str) -> Vec<Step>,
+        queue: VecDeque<Step>,
+        pub seen: Arc<Mutex<Vec<String>>>,
+        pub gate: Arc<Gate>,
+    }
+
+    impl ScriptedBackend {
+        /// `script` maps a username to its message sequence; any response
+        /// but "fail" succeeds.
+        pub fn new(script: fn(&str) -> Vec<Step>) -> Self {
+            Self { script, queue: VecDeque::new(), seen: Arc::default(), gate: Arc::default() }
+        }
+
+        fn record(&self, entry: String) {
+            self.seen.lock().unwrap().push(entry);
+        }
+
+        fn next(&mut self) -> Response {
+            loop {
+                match self.queue.pop_front() {
+                    Some(Step::Wait) => self.gate.pass(),
+                    Some(Step::Fail(text)) => {
+                        return Response::Error {
+                            error_type: ErrorType::AuthError,
+                            description: text.into(),
+                        }
+                    }
+                    Some(Step::Msg(auth_message_type, text)) => {
+                        return Response::AuthMessage {
+                            auth_message_type,
+                            auth_message: text.into(),
+                        }
+                    }
+                    None => return Response::Success,
+                }
+            }
+        }
+    }
+
+    impl Backend for ScriptedBackend {
+        fn roundtrip(&mut self, request: Request) -> Result<Response, BackendError> {
+            Ok(match request {
+                Request::CreateSession { username } => {
+                    self.record(format!("create {username}"));
+                    self.queue = (self.script)(&username).into();
+                    self.next()
+                }
+                Request::PostAuthMessageResponse { response } => {
+                    self.record(format!("respond {:?}", response.as_deref()));
+                    if response.as_deref() == Some("fail") {
+                        self.queue.clear();
+                        Response::Error {
+                            error_type: ErrorType::AuthError,
+                            description: "wrong password".into(),
+                        }
+                    } else {
+                        self.next()
+                    }
+                }
+                Request::StartSession { cmd, .. } => {
+                    self.record(format!("start {}", cmd.join(" ")));
+                    Response::Success
+                }
+                Request::CancelSession => {
+                    self.record("cancel".into());
+                    self.queue.clear();
+                    Response::Success
+                }
+            })
+        }
     }
 }
 

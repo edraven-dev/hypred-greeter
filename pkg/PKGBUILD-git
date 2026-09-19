@@ -1,5 +1,5 @@
 # Maintainer: edraven <edraven.dev@gmail.com>
-# -git PKGBUILD — reference copy; the AUR repo carries the live one.
+# -git PKGBUILD (builds main) — build with makepkg from a clone; not on the AUR.
 pkgname=hypred-greeter-git
 _pkgname=hypred-greeter
 pkgver=r1.0000000
