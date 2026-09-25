@@ -79,17 +79,30 @@ impl AppHandle {
 
     pub fn set_username(&self, username: &str) {
         *self.shared.username.borrow_mut() = username.to_string();
+        self.bus.emit(&UiEvent::UsernameChanged(username.to_string()));
         if let Some(index) = self.shared.preselected_session() {
-            if index != self.shared.selected_session.get() {
-                self.shared.selected_session.set(index);
-                self.bus.emit(&UiEvent::SessionChanged(index));
-            }
+            self.select_session(index);
         }
     }
 
+    /// The selected session's display name; empty without sessions.
+    pub fn session_name(&self) -> String {
+        self.shared.selected().map(|s| s.name.clone()).unwrap_or_default()
+    }
+
     pub fn select_session(&self, index: usize) {
-        if index < self.shared.sessions.len() {
+        if index < self.shared.sessions.len() && index != self.shared.selected_session.get() {
             self.shared.selected_session.set(index);
+            self.bus.emit(&UiEvent::SessionChanged(index));
+        }
+    }
+
+    /// The next (+1) or previous (-1) session, wrapping around.
+    pub fn step_session(&self, step: isize) {
+        let count = self.shared.sessions.len();
+        if count > 0 {
+            let current = self.shared.selected_session.get() as isize;
+            self.select_session((current + step).rem_euclid(count as isize) as usize);
         }
     }
 
@@ -120,8 +133,9 @@ impl AppHandle {
         self.auth.note_activity();
     }
 
+    /// Through auth, so a widget's texts get the same rewrite as PAM's.
     pub fn emit(&self, event: &UiEvent) {
-        self.bus.emit(event);
+        self.auth.emit(event.clone());
     }
 }
 
@@ -205,5 +219,66 @@ mod tests {
         let default = Some("wayland/hyprland-uwsm");
         let shared = Shared::new("edraven".into(), sessions(), state, default);
         assert_eq!(shared.selected_session.get(), 0);
+    }
+
+    /// Runs `scenario` with a handle over `shared` and returns the events
+    /// it caused, on a context of its own like the auth tests.
+    fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+        let context = glib::MainContext::new();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let acquired = context.with_thread_default(|| {
+            let bus = Rc::new(Bus::default());
+            let sink = log.clone();
+            bus.subscribe(move |event| {
+                sink.borrow_mut().push(match event {
+                    UiEvent::SessionChanged(index) => format!("session {index}"),
+                    UiEvent::UsernameChanged(name) => format!("username {name}"),
+                    other => format!("{other:?}"),
+                })
+            });
+            let auth = Auth::start(
+                Box::new(crate::backend::DemoBackend::new()),
+                bus.clone(),
+                true,
+                &crate::config::Auth::default(),
+                &crate::config::Texts::default(),
+                crate::auth::Hooks {
+                    current_username: Box::new(String::new),
+                    resolve_start: Box::new(|_| (vec![], vec![])),
+                    on_started: Box::new(|| {}),
+                    seat_active: Box::new(|| true),
+                },
+            );
+            scenario(&AppHandle::new(auth, bus, shared, Duration::from_millis(400)));
+        });
+        acquired.expect("test context must be acquirable");
+        std::mem::forget(context);
+        Rc::try_unwrap(log).unwrap().into_inner()
+    }
+
+    #[test]
+    fn selecting_a_session_announces_a_change_and_steps_wrap() {
+        let shared = Shared::new(String::new(), sessions(), State::default(), None);
+        let log = events(shared, |app| {
+            app.select_session(0);
+            app.select_session(7);
+            app.select_session(1);
+            app.step_session(1);
+            app.step_session(-1);
+            assert_eq!(app.session_name(), "Hyprland (uwsm-managed)");
+        });
+        assert_eq!(log, ["session 1", "session 0", "session 1"]);
+    }
+
+    #[test]
+    fn a_username_edit_announces_itself_then_snaps_the_session() {
+        let mut state = State::default();
+        state.last_session.insert("bob".into(), "wayland/hyprland-uwsm".into());
+        let shared = Shared::new(String::new(), sessions(), state, None);
+        let log = events(shared, |app| {
+            app.set_username("bo");
+            app.set_username("bob");
+        });
+        assert_eq!(log, ["username bo", "username bob", "session 1"]);
     }
 }

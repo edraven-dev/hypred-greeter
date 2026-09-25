@@ -106,7 +106,8 @@ impl WidgetDef for PasswordDef {
                 | UiEvent::PamError(_)
                 | UiEvent::SessionChanged(_)
                 | UiEvent::Armed(_)
-                | UiEvent::Starting => {}
+                | UiEvent::Starting
+                | UiEvent::UsernameChanged(_) => {}
             }
         });
         Ok(entry.upcast())

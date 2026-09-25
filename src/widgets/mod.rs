@@ -1,6 +1,8 @@
 mod background;
+mod button;
 mod clock;
 mod containers;
+mod image;
 mod label;
 mod message;
 mod password;
@@ -117,6 +119,8 @@ impl Registry {
         registry.register(Box::new(containers::OverlayDef));
         registry.register(Box::new(containers::GridDef));
         registry.register(Box::new(label::LabelDef));
+        registry.register(Box::new(button::ButtonDef));
+        registry.register(Box::new(image::ImageDef));
         registry.register(Box::new(background::BackgroundDef));
         registry.register(Box::new(clock::ClockDef));
         registry.register(Box::new(message::MessageDef));

@@ -25,6 +25,8 @@ pub enum UiEvent {
     /// The session is being started (after auth success).
     Starting,
     Focus(FocusTarget),
+    /// The username entry's text; also emitted once at startup.
+    UsernameChanged(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

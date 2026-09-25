@@ -8,7 +8,7 @@ use crate::widgets::{apply_text_props, WidgetDef, WidgetError};
 
 pub struct ClockDef;
 
-fn now(format: &str) -> Option<glib::GString> {
+pub fn now(format: &str) -> Option<glib::GString> {
     glib::DateTime::now_local().ok()?.format(format).ok()
 }
 
@@ -25,6 +25,13 @@ impl WidgetDef for ClockDef {
 
         let label = gtk::Label::new(Some(&text));
         apply_text_props(&label, node)?;
+        if label.uses_markup() {
+            if let Err(err) = gtk::pango::parse_markup(&format, '\0') {
+                return Err(WidgetError::Other(format!(
+                    "`format` is not valid Pango markup: {err}"
+                )));
+            }
+        }
         let weak = label.downgrade();
         glib::timeout_add_seconds_local(1, move || match weak.upgrade() {
             Some(label) => {

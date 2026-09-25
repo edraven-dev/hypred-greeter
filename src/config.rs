@@ -1,4 +1,6 @@
+use gtk4::glib;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/greetd/hypred-greeter/config.toml";
@@ -12,6 +14,7 @@ pub struct Config {
     pub auth: Auth,
     pub commands: Commands,
     pub sessions: Sessions,
+    pub texts: Texts,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +77,8 @@ pub struct Gtk {
 pub struct Auth {
     pub eager: bool,
     pub rearm_window: Rearm,
+    /// The username shown when nothing is remembered.
+    pub user: Option<String>,
     /// Seconds text left in the password entry keeps a parked prompt ready
     /// after the last input — a stray key must not switch the reader off.
     pub typing_hold: u64,
@@ -87,6 +92,7 @@ impl Default for Auth {
         Self {
             eager: false,
             rearm_window: Rearm::Never,
+            user: None,
             typing_hold: 30,
             username_debounce_ms: 400,
         }
@@ -137,19 +143,32 @@ impl<'de> Deserialize<'de> for Rearm {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case", default)]
-pub struct Commands {
-    pub reboot: Vec<String>,
-    pub poweroff: Vec<String>,
-}
+/// Name → argv, for `button` actions and the power buttons.
+#[derive(Debug)]
+pub struct Commands(pub HashMap<String, Vec<String>>);
 
 impl Default for Commands {
     fn default() -> Self {
-        Self {
-            reboot: vec!["systemctl".into(), "reboot".into()],
-            poweroff: vec!["systemctl".into(), "poweroff".into()],
-        }
+        let argv = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        Self(HashMap::from([
+            ("reboot".to_string(), argv("systemctl", "reboot")),
+            ("poweroff".to_string(), argv("systemctl", "poweroff")),
+        ]))
+    }
+}
+
+impl Commands {
+    pub fn get(&self, name: &str) -> Option<&[String]> {
+        self.0.get(name).map(Vec::as_slice)
+    }
+}
+
+/// A user table adds to and overrides the defaults, never removes one.
+impl<'de> Deserialize<'de> for Commands {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut commands = Self::default();
+        commands.0.extend(HashMap::<String, Vec<String>>::deserialize(deserializer)?);
+        Ok(commands)
     }
 }
 
@@ -161,6 +180,15 @@ pub struct Sessions {
     /// Session id ("wayland/hyprland-uwsm") preselected for a user with
     /// nothing remembered; else the first by name.
     pub default: Option<String>,
+    /// Ids: `only` keeps just these, `hide` drops these, `order` lists
+    /// these first (the rest follow by name).
+    pub only: Vec<String>,
+    pub hide: Vec<String>,
+    pub order: Vec<String>,
+    /// Appended to the display name of X11 sessions.
+    pub x11_suffix: String,
+    /// Id → display name (`[sessions.names]`).
+    pub names: HashMap<String, String>,
 }
 
 impl Default for Sessions {
@@ -169,6 +197,133 @@ impl Default for Sessions {
             x11_prefix: vec!["startx".into(), "/usr/bin/env".into()],
             env: vec![],
             default: None,
+            only: vec![],
+            hide: vec![],
+            order: vec![],
+            x11_suffix: " (X11)".into(),
+            names: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct Texts {
+    pub enter_username: String,
+    pub username_changed: String,
+    /// When greetd's error description is empty.
+    pub auth_failed: String,
+    /// `{program}` and `{error}` are filled in.
+    pub power_failed: String,
+    pub rewrite: Vec<Rewrite>,
+}
+
+impl Default for Texts {
+    fn default() -> Self {
+        Self {
+            enter_username: "enter a username".into(),
+            username_changed: "username changed — enter the password again".into(),
+            auth_failed: "authentication failed".into(),
+            power_failed: "{program}: {error}".into(),
+            rewrite: vec![],
+        }
+    }
+}
+
+/// `[[texts.rewrite]]`: a text containing `match` (a substring, or a
+/// glib::Regex pattern with `regex = true`) becomes `text` — empty drops
+/// it; `kind` limits the rule to one kind of text. The first match wins.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Rewrite {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    #[serde(default)]
+    pub regex: bool,
+    pub text: String,
+    #[serde(default)]
+    pub kind: Option<TextKind>,
+    /// Compiled once, on first use.
+    #[serde(skip)]
+    compiled: std::cell::OnceCell<Result<glib::Regex, String>>,
+}
+
+/// `error`: a PAM message mid-conversation; `failure`: a conversation
+/// that ended in an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextKind {
+    Info,
+    Error,
+    Prompt,
+    Failure,
+}
+
+impl Texts {
+    /// The text after the first matching rule; `None` when that rule
+    /// drops it. An empty text (a clear) passes untouched.
+    pub fn rewrite(&self, kind: TextKind, text: &str) -> Option<String> {
+        if text.is_empty() {
+            return Some(String::new());
+        }
+        let rule = self
+            .rewrite
+            .iter()
+            .filter(|rule| !rule.pattern.is_empty() && rule.kind.is_none_or(|limit| limit == kind))
+            .find_map(|rule| rule.apply(text));
+        match rule {
+            Some(rewritten) => (!rewritten.is_empty()).then_some(rewritten),
+            None => Some(text.to_string()),
+        }
+    }
+
+    fn problems(&self) -> Vec<String> {
+        self.rewrite
+            .iter()
+            .enumerate()
+            .filter_map(|(i, rule)| {
+                if rule.pattern.is_empty() {
+                    return Some(format!(
+                        "texts.rewrite[{i}]: `match` is empty, the rule is skipped"
+                    ));
+                }
+                let err = rule.compiled()?.err()?;
+                Some(format!("texts.rewrite[{i}]: `{}` is not a valid regex: {err}", rule.pattern))
+            })
+            .collect()
+    }
+}
+
+impl Rewrite {
+    /// A `regex = true` rule's pattern; `None` for a substring rule.
+    fn compiled(&self) -> Option<Result<&glib::Regex, &str>> {
+        if !self.regex {
+            return None;
+        }
+        let compiled = self.compiled.get_or_init(|| {
+            let flags = (glib::RegexCompileFlags::DEFAULT, glib::RegexMatchFlags::DEFAULT);
+            // g_regex_new returns a regex or an error, never neither.
+            glib::Regex::new(&self.pattern, flags.0, flags.1)
+                .map(Option::unwrap)
+                .map_err(|err| err.to_string())
+        });
+        Some(compiled.as_ref().map_err(String::as_str))
+    }
+
+    /// `Some` when the rule matches; a regex rule expands `\1` references
+    /// in `text`.
+    fn apply(&self, text: &str) -> Option<String> {
+        let Some(regex) = self.compiled() else {
+            return text.contains(&self.pattern).then(|| self.text.clone());
+        };
+        let text = glib::GString::from(text);
+        let found = regex.ok()?.match_(text.as_gstr(), glib::RegexMatchFlags::DEFAULT).ok()?;
+        if !found.matches() {
+            return None;
+        }
+        match found.expand_references(&self.text) {
+            Ok(expanded) => Some(expanded.map(|s| s.to_string()).unwrap_or_default()),
+            Err(_) => Some(self.text.clone()),
         }
     }
 }
@@ -202,6 +357,9 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
             // (`rearm_window` would switch re-arming off): say so on screen.
             problems.extend(
                 unknown.iter().map(|key| format!("config {}: unknown key `{key}`", path.display())),
+            );
+            problems.extend(
+                config.texts.problems().iter().map(|p| format!("config {}: {p}", path.display())),
             );
             config
         }
@@ -240,8 +398,133 @@ mod tests {
     #[test]
     fn empty_input_yields_defaults() {
         let config = parse("").unwrap().0;
-        assert_eq!(config.commands.reboot, ["systemctl", "reboot"]);
+        assert_eq!(config.commands.get("reboot").unwrap(), ["systemctl", "reboot"]);
         assert_eq!(config.paths.style, PathBuf::from("style.css"));
+    }
+
+    #[test]
+    fn a_commands_table_adds_and_overrides_but_keeps_the_rest() {
+        let text = "[commands]\nsuspend = [\"systemctl\", \"suspend\"]\nreboot = [\"loginctl\", \"reboot\"]\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(config.commands.get("suspend").unwrap(), ["systemctl", "suspend"]);
+        assert_eq!(config.commands.get("reboot").unwrap(), ["loginctl", "reboot"]);
+        assert_eq!(config.commands.get("poweroff").unwrap(), ["systemctl", "poweroff"]);
+        assert_eq!(config.commands.get("hibernate"), None);
+    }
+
+    #[test]
+    fn auth_user_is_the_fallback_username() {
+        assert_eq!(parse("").unwrap().0.auth.user, None);
+        let config = parse("[auth]\nuser = \"edraven\"\n").unwrap().0;
+        assert_eq!(config.auth.user.as_deref(), Some("edraven"));
+    }
+
+    #[test]
+    fn sessions_filters_names_and_suffix_parse() {
+        let text = "[sessions]\nonly = [\"wayland/a\"]\nhide = [\"x11/b\"]\n\
+                    order = [\"wayland/c\", \"wayland/a\"]\nx11-suffix = \"\"\n\
+                    [sessions.names]\n\"wayland/a\" = \"Alpha\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let sessions = &config.sessions;
+        assert_eq!(sessions.only, ["wayland/a"]);
+        assert_eq!(sessions.hide, ["x11/b"]);
+        assert_eq!(sessions.order, ["wayland/c", "wayland/a"]);
+        assert_eq!(sessions.x11_suffix, "");
+        assert_eq!(sessions.names["wayland/a"], "Alpha");
+        assert_eq!(Sessions::default().x11_suffix, " (X11)");
+    }
+
+    #[test]
+    fn texts_default_to_the_built_in_strings() {
+        let texts = parse("").unwrap().0.texts;
+        assert_eq!(texts.enter_username, "enter a username");
+        assert_eq!(texts.username_changed, "username changed — enter the password again");
+        assert_eq!(texts.auth_failed, "authentication failed");
+        assert_eq!(texts.power_failed, "{program}: {error}");
+        assert!(texts.rewrite.is_empty());
+        let texts = parse("[texts]\nauth-failed = \"nope\"\n").unwrap().0.texts;
+        assert_eq!(texts.auth_failed, "nope");
+        assert_eq!(texts.enter_username, "enter a username");
+    }
+
+    fn rules(toml: &str) -> Texts {
+        parse(toml).unwrap().0.texts
+    }
+
+    #[test]
+    fn rewrite_substring_first_match_wins_and_empty_drops() {
+        let texts = rules(
+            "[[texts.rewrite]]\nmatch = \"finger\"\ntext = \"Touch the reader\"\n\
+             [[texts.rewrite]]\nmatch = \"Place\"\ntext = \"never reached\"\n\
+             [[texts.rewrite]]\nmatch = \"timed out\"\ntext = \"\"\n",
+        );
+        let place = "Place your right thumb on the fingerprint reader";
+        assert_eq!(texts.rewrite(TextKind::Info, place).as_deref(), Some("Touch the reader"));
+        assert_eq!(texts.rewrite(TextKind::Info, "Verification timed out"), None);
+        assert_eq!(texts.rewrite(TextKind::Info, "Finger").as_deref(), Some("Finger"));
+        assert_eq!(texts.rewrite(TextKind::Info, "").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn rewrite_kind_limits_a_rule() {
+        let texts = rules(
+            "[[texts.rewrite]]\nmatch = \"Password\"\ntext = \"Passwort:\"\nkind = \"prompt\"\n",
+        );
+        assert_eq!(texts.rewrite(TextKind::Prompt, "Password:").as_deref(), Some("Passwort:"));
+        assert_eq!(texts.rewrite(TextKind::Error, "Password:").as_deref(), Some("Password:"));
+        assert_eq!(texts.rewrite(TextKind::Failure, "Password:").as_deref(), Some("Password:"));
+    }
+
+    #[test]
+    fn rewrite_regex_expands_references() {
+        let texts = rules(
+            "[[texts.rewrite]]\nmatch = '^Place your (\\w+) (\\w+)'\nregex = true\n\
+             text = 'Your \\1 \\2, please'\n",
+        );
+        let place = "Place your right thumb on the fingerprint reader";
+        let expected = Some("Your right thumb, please");
+        assert_eq!(texts.rewrite(TextKind::Info, place).as_deref(), expected);
+        assert_eq!(
+            texts.rewrite(TextKind::Info, "Misplace your").as_deref(),
+            Some("Misplace your")
+        );
+    }
+
+    #[test]
+    fn a_bad_regex_is_a_problem_and_matches_nothing() {
+        let texts = rules("[[texts.rewrite]]\nmatch = \"(\"\nregex = true\ntext = \"x\"\n");
+        let problems = texts.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("texts.rewrite[0]: `(` is not a valid regex"),
+            "{problems:?}"
+        );
+        assert_eq!(texts.rewrite(TextKind::Info, "(").as_deref(), Some("("));
+        assert!(rules("[[texts.rewrite]]\nmatch = \"(\"\ntext = \"x\"\n").problems().is_empty());
+    }
+
+    #[test]
+    fn an_empty_match_is_a_problem_and_skipped() {
+        let texts = rules(
+            "[[texts.rewrite]]\nmatch = \"\"\ntext = \"EVERYTHING\"\n\
+             [[texts.rewrite]]\nmatch = \"\"\nregex = true\ntext = \"x\"\n",
+        );
+        let problems = texts.problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().all(|p| p.contains("`match` is empty")), "{problems:?}");
+        let place = "Place your finger";
+        assert_eq!(texts.rewrite(TextKind::Info, place).as_deref(), Some(place));
+    }
+
+    #[test]
+    fn a_rewrite_rule_needs_match_and_text_and_a_known_kind() {
+        assert!(parse("[[texts.rewrite]]\ntext = \"x\"\n").is_err());
+        assert!(parse("[[texts.rewrite]]\nmatch = \"x\"\n").is_err());
+        assert!(
+            parse("[[texts.rewrite]]\nmatch = \"x\"\ntext = \"y\"\nkind = \"warning\"\n").is_err()
+        );
     }
 
     #[test]

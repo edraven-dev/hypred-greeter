@@ -112,6 +112,14 @@ impl Props {
         }
     }
 
+    pub fn str_list(&self, key: &str) -> Result<Option<Vec<String>>, WidgetError> {
+        let Some(value) = self.raw(key) else { return Ok(None) };
+        let items = value
+            .as_array()
+            .and_then(|items| items.iter().map(|v| v.as_str().map(str::to_string)).collect());
+        items.map(Some).ok_or_else(|| WidgetError::bad_prop(key, "an array of strings", value))
+    }
+
     pub fn unconsumed(&self) -> Vec<String> {
         let consumed = self.consumed.borrow();
         self.table.keys().filter(|k| !consumed.contains(*k)).cloned().collect()
@@ -162,18 +170,25 @@ mod tests {
     }
 
     #[test]
-    fn floats_take_integers_too() {
-        let p = props("half = 0.5\nright = 1\nword = \"x\"\n");
-        assert_eq!(p.float("half").unwrap(), Some(0.5));
-        assert_eq!(p.float("right").unwrap(), Some(1.0));
-        assert_eq!(p.float("missing").unwrap(), None);
-        assert!(p.float("word").is_err());
-    }
-
-    #[test]
     fn type_mismatch_errors_but_still_consumes_the_key() {
         let p = props("col = \"two\"\n");
         assert!(p.int("col").is_err());
+        assert!(p.unconsumed().is_empty());
+    }
+
+    #[test]
+    fn floats_take_integers_and_lists_take_only_strings() {
+        let p = props(
+            "xalign = 0.5\nwhole = 1\nword = \"x\"\ncommand = [\"sh\", \"-c\", \"id\"]\nmixed = [\"a\", 1]\n",
+        );
+        assert_eq!(p.float("xalign").unwrap(), Some(0.5));
+        assert_eq!(p.float("whole").unwrap(), Some(1.0));
+        assert_eq!(p.float("missing").unwrap(), None);
+        assert!(p.float("word").is_err());
+        assert_eq!(p.str_list("command").unwrap().unwrap(), ["sh", "-c", "id"]);
+        assert_eq!(p.str_list("missing").unwrap(), None);
+        let err = p.str_list("mixed").unwrap_err().to_string();
+        assert!(err.contains("an array of strings"), "{err}");
         assert!(p.unconsumed().is_empty());
     }
 

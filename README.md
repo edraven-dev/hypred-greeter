@@ -58,12 +58,36 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
 | `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (`dark` is then off: GTK has no Empty-dark) | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, `30`, `400` |
-| `[commands]` | `reboot`, `poweroff` (argv arrays) | `["systemctl", ...]` |
-| `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`) | `["startx", "/usr/bin/env"]`, `[]`, first by name |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `30`, `400` |
+| `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
+| `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
+| `[texts]` | `enter-username`, `username-changed`, `auth-failed` (when greetd's error has no text), `power-failed` (`{program}`, `{error}`); `[[texts.rewrite]]` entries — see below | the built-in English strings |
 
 A key the greeter does not know (a typo like `rearm_window`) keeps its
-default in force and is named in the on-screen banner.
+default in force and is named in the on-screen banner. An id in
+`[sessions]` that matches no installed session is named there too.
+
+**Rewriting texts.** Every text shown — PAM's info and error messages,
+prompts, the failure after a wrong password, the greeter's own — passes
+the `[[texts.rewrite]]` rules once on its way out; the first rule that
+matches wins:
+
+```toml
+[[texts.rewrite]]
+match = "Place your"                 # a substring, case-sensitive
+text = "Touch the fingerprint reader" # the whole message becomes this; "" drops it
+kind = "info"                        # optional: info | error | prompt | failure
+
+[[texts.rewrite]]
+match = '^Place your (\w+) (\w+)'    # regex = true: a glib::Regex pattern,
+regex = true                         # \1 references in text
+text = 'Your \1 \2, please'
+```
+
+`error` is a PAM message mid-conversation, `failure` the error a
+conversation ends in (see "Two kinds of error" below). A dropped info or
+error is not shown at all; a dropped prompt or failure goes out with an
+empty text (the entry is still cleared and refocused).
 
 ### layout.toml — the widget tree
 
@@ -124,16 +148,18 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 | `box` | `orientation`, `spacing`, `homogeneous` | container |
 | `overlay` | — | container; children after the first float, placed by `anchor` |
 | `grid` | `row-spacing`, `column-spacing`; children take `col`, `row`, `col-span`, `row-span` | container |
-| `label` | `text`, `wrap`, `max-width-chars` | static text; a wrapping label asks for its one-line width unless capped |
+| `label` | `text`, `wrap`, `max-width-chars`, text properties, `command` (argv) + `interval` (seconds) | text with placeholders: `{user}` (the username entry), `{hostname}`, `{session}` (the selected session's name), `{time:%H:%M}` (strftime, ticks every second); `{{`/`}}` for a literal brace. With `command` the trimmed stdout is the text (placeholders apply to it too), run off the main thread once, or every `interval` seconds — in `--demo` too; a failing run leaves the previous text; braces in the output are plain text, and under `markup` the output is escaped. A wrapping label asks for its one-line width unless capped |
+| `button` | `label` and/or `icon` (a theme icon name or an absolute image path), `tooltip`, `action` or `command` (exactly one), `confirm` | `action`: a `[commands]` name, or built-in `cancel`, `next-session`, `prev-session`, `focus-username`, `focus-password`; `command = [argv]` runs that argv. Icon + label render as a box inside the button (icon first). `confirm = true`: the first click arms it (`.hg-button-confirm` for 3 s), the second runs it. Demo mode shows "demo: would run …" instead |
+| `image` | exactly one of `file` (a path; relative to the config dir), `icon` (theme icon name), `source = "avatar"`; `size` (pixels) | a picture. `avatar`: the current user's — `/var/lib/AccountsService/icons/<user>`, then `~<user>/.face`; re-read as the username changes; nothing readable (or anything but a regular file of at most 1 MiB and 4096 px a side) shows nothing. Without `size` a GtkImage shows at the stylesheet's `-gtk-icon-size` (16 px unless set); `size` is the box the picture fits in |
 | `background` | `image`, `fit` | wallpaper; defaults from `[background]` |
 | `clock` | `format` (strftime), text properties | ticks every second |
-| `username` | `placeholder`, `xalign` | prefilled with the last user; Enter moves on to the password |
+| `username` | `placeholder`, `xalign` | prefilled with the last user (else `[auth] user`); Enter moves on to the password |
 | `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
 | `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
-| `session` | — | dropdown over wayland-sessions + xsessions |
-| `power` | `reboot-label`, `poweroff-label`, `spacing` (0) | runs `[commands]` |
+| `session` | `style` (`dropdown`, `buttons`, `cycle`), for `buttons`: `orientation`, `spacing` | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
+| `power` | `reboot-label`, `poweroff-label`, `orientation`, `spacing` (0) | sugar: a box of two `button`s named `#hg-power-reboot` / `#hg-power-poweroff` with `action = "reboot"` / `"poweroff"` — build the same by hand for a third one |
 
-**Text properties** (`clock`, `message`): `xalign` (0.0 left … 1.0 right,
+**Text properties** (`label`, `clock`, `message`): `xalign` (0.0 left … 1.0 right,
 within the space the widget gets), `justify` (`left`/`center`/`right`/`fill`,
 for wrapped lines), `ellipsize` (`none`/`start`/`middle`/`end`), `lines` (with
 `ellipsize`: at most that many lines), `markup` (the text is Pango markup:
@@ -158,8 +184,13 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 | `entry.hg-password` | password entry (GtkPasswordEntry) |
 | `entry.hg-password.hg-password-busy` | … while a submitted password is on its way (read-only) |
 | `.hg-message`, `.hg-message.hg-message-error` | PAM messages / auth errors (also `-info`, `-prompt`, `-empty` — see state classes) |
-| `dropdown.hg-session`, `dropdown.hg-session > button` | session picker |
-| `.hg-power button`, `#hg-power-reboot`, `#hg-power-poweroff` | power buttons |
+| `dropdown.hg-session`, `dropdown.hg-session > button` | session picker (`style = "dropdown"`) |
+| `.hg-session .hg-session-item`, `… .hg-session-item:checked` | session picker buttons (`style = "buttons"`), the selected one |
+| `button.hg-session` | session picker (`style = "cycle"`) |
+| `button.hg-button`, `.hg-button.hg-button-confirm` | `button` widgets; one armed by `confirm` |
+| `.hg-button > box` | a button's icon + label row (`border-spacing` for the gap) |
+| `.hg-image` | `image` widgets |
+| `.hg-power button`, `#hg-power-reboot`, `#hg-power-poweroff` | power buttons (they are `button` widgets too) |
 | `#card` (or any `name` you set) | your named widgets |
 
 GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
@@ -272,6 +303,15 @@ possible later without breaking existing widgets.
   session id is `<kind>/<desktop file stem>`, e.g. `wayland/hyprland-uwsm`.
   Typing a known username snaps the session picker to their remembered
   session.
+- **Sessions** come from `wayland-sessions/` and `xsessions/` under
+  `$XDG_DATA_DIRS`, the first directory holding a stem wins — a
+  `NoDisplay=true` copy there hides the later ones, as XDG has it. What
+  `[sessions] only`/`hide`/`order`/`names` make of the list is what every
+  picker, `{session}` placeholder and the remembered-session lookup see.
+- **A layout without a `username` widget** is accepted only when a
+  username resolves (remembered, or `[auth] user`); otherwise the built-in
+  layout takes over, with a banner line saying why — like a layout without
+  a `password` widget.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
   transport failure, `101` panic.

@@ -1,11 +1,13 @@
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
-use crate::layout::Node;
-use crate::ui::bus::UiEvent;
+use crate::layout::node::Common;
+use crate::layout::{Node, Props};
 use crate::ui::ctx::BuildCtx;
-use crate::widgets::{WidgetDef, WidgetError};
+use crate::widgets::{containers, WidgetDef, WidgetError};
 
+/// Sugar: a box of two `button`s, `#hg-power-reboot` and
+/// `#hg-power-poweroff`, running the `reboot` and `poweroff` commands.
 pub struct PowerDef;
 
 impl WidgetDef for PowerDef {
@@ -15,37 +17,30 @@ impl WidgetDef for PowerDef {
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
         let row = gtk::Box::new(
-            gtk::Orientation::Horizontal,
+            containers::parse_orientation(&node.props, "horizontal")?,
             node.props.int("spacing")?.unwrap_or(0) as i32,
         );
-        for (id, label_key, default_label, command) in [
-            ("hg-power-reboot", "reboot-label", "Reboot", ctx.config.commands.reboot.clone()),
-            (
-                "hg-power-poweroff",
-                "poweroff-label",
-                "Power Off",
-                ctx.config.commands.poweroff.clone(),
-            ),
-        ] {
-            let button = gtk::Button::with_label(&node.props.str_or(label_key, default_label)?);
-            button.set_widget_name(id);
-            let app = ctx.app.clone();
-            let demo = ctx.demo;
-            button.connect_clicked(move |_| {
-                if demo {
-                    app.emit(&UiEvent::Info(format!("demo: would run {}", command.join(" "))));
-                    return;
-                }
-                let Some((program, args)) = command.split_first() else {
-                    app.emit(&UiEvent::AuthError("power: empty command configured".into()));
-                    return;
-                };
-                if let Err(err) = std::process::Command::new(program).args(args).spawn() {
-                    app.emit(&UiEvent::AuthError(format!("power: {program}: {err}")));
-                }
-            });
-            row.append(&button);
+        for (action, label_key, default) in
+            [("reboot", "reboot-label", "Reboot"), ("poweroff", "poweroff-label", "Power Off")]
+        {
+            let label = node.props.str_or(label_key, default)?;
+            row.append(&ctx.build_child(&button(node, action, label)));
         }
         Ok(row.upcast())
+    }
+}
+
+fn button(parent: &Node, action: &str, label: String) -> Node {
+    let mut props = toml::Table::new();
+    props.insert("label".into(), label.into());
+    props.insert("action".into(), action.into());
+    Node {
+        kind: "button".into(),
+        name: Some(format!("hg-power-{action}")),
+        classes: Vec::new(),
+        common: Common::default(),
+        props: Props::new(props),
+        children: Vec::new(),
+        path: format!("{}.{action}", parent.path),
     }
 }

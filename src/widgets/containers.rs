@@ -1,9 +1,17 @@
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
-use crate::layout::Node;
+use crate::layout::{Node, Props};
 use crate::ui::ctx::BuildCtx;
 use crate::widgets::{WidgetDef, WidgetError};
+
+pub fn parse_orientation(props: &Props, default: &str) -> Result<gtk::Orientation, WidgetError> {
+    match props.str_or("orientation", default)?.as_str() {
+        "vertical" | "v" => Ok(gtk::Orientation::Vertical),
+        "horizontal" | "h" => Ok(gtk::Orientation::Horizontal),
+        _ => Err(WidgetError::Other("`orientation` must be \"vertical\" or \"horizontal\"".into())),
+    }
+}
 
 pub struct BoxDef;
 
@@ -17,17 +25,8 @@ impl WidgetDef for BoxDef {
     }
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-        let orientation = match node.props.str_or("orientation", "vertical")?.as_str() {
-            "vertical" | "v" => gtk::Orientation::Vertical,
-            "horizontal" | "h" => gtk::Orientation::Horizontal,
-            _ => {
-                return Err(WidgetError::Other(
-                    "`orientation` must be \"vertical\" or \"horizontal\"".into(),
-                ))
-            }
-        };
         let gtk_box = gtk::Box::builder()
-            .orientation(orientation)
+            .orientation(parse_orientation(&node.props, "vertical")?)
             .spacing(node.props.int("spacing")?.unwrap_or(0) as i32)
             .homogeneous(node.props.bool("homogeneous")?.unwrap_or(false))
             .build();

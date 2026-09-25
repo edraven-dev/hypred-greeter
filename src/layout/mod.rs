@@ -13,9 +13,10 @@ pub struct Loaded {
     pub problems: Vec<String>,
 }
 
-/// `require_auth`: outside demo a tree with no `password` widget falls
-/// back to the built-in layout — login must never be impossible.
-pub fn load(path: &Path, require_auth: bool) -> Loaded {
+/// `require_auth`: outside demo a tree that makes login impossible falls
+/// back to the built-in layout; `known_user`: a username is remembered or
+/// configured, so a layout may leave the `username` widget out.
+pub fn load(path: &Path, require_auth: bool, known_user: bool) -> Loaded {
     let mut problems = Vec::new();
 
     let root = std::fs::read_to_string(path)
@@ -25,12 +26,12 @@ pub fn load(path: &Path, require_auth: bool) -> Loaded {
             info!("layout: {}", path.display());
             parse_str(&text, &mut problems)
         })
-        .filter(|root| {
-            let ok = !require_auth || contains_kind(root, "password");
-            if !ok {
-                problems.push("layout has no `password` widget — using built-in layout".into());
+        .filter(|root| match login_possible(root, require_auth, known_user) {
+            Ok(()) => true,
+            Err(why) => {
+                problems.push(format!("{why} — using built-in layout"));
+                false
             }
-            ok
         });
 
     let root = root.unwrap_or_else(|| {
@@ -205,6 +206,18 @@ fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>)
     common
 }
 
+fn login_possible(root: &Node, require_auth: bool, known_user: bool) -> Result<(), &'static str> {
+    if !require_auth {
+        Ok(())
+    } else if !contains_kind(root, "password") {
+        Err("layout has no `password` widget")
+    } else if !contains_kind(root, "username") && !known_user {
+        Err("layout has no `username` widget and no user is known")
+    } else {
+        Ok(())
+    }
+}
+
 pub fn contains_kind(node: &Node, kind: &str) -> bool {
     any(node, &|node| node.kind == kind)
 }
@@ -229,6 +242,20 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         assert!(contains_kind(&root, "password"), "default layout must allow login");
         assert!(contains_kind(&root, "background"));
+    }
+
+    #[test]
+    fn a_layout_without_username_needs_a_known_user() {
+        let mut problems = Vec::new();
+        let text = "[root]\nwidget = \"box\"\n[[root.children]]\nwidget = \"password\"\n";
+        let root = parse_str(text, &mut problems).unwrap();
+        assert_eq!(login_possible(&root, true, true), Ok(()));
+        assert_eq!(login_possible(&root, false, false), Ok(()));
+        let err = login_possible(&root, true, false).unwrap_err();
+        assert_eq!(err, "layout has no `username` widget and no user is known");
+        let text = "[root]\nwidget = \"username\"\n";
+        let root = parse_str(text, &mut problems).unwrap();
+        assert_eq!(login_possible(&root, true, true), Err("layout has no `password` widget"));
     }
 
     #[test]

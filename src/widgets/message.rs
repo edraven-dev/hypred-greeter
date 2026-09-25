@@ -197,7 +197,8 @@ impl WidgetDef for MessageDef {
                 | UiEvent::SessionChanged(_)
                 | UiEvent::Armed(_)
                 | UiEvent::Starting
-                | UiEvent::Focus(_) => {}
+                | UiEvent::Focus(_)
+                | UiEvent::UsernameChanged(_) => {}
             }
         });
         Ok(label.upcast())

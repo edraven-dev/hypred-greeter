@@ -207,7 +207,7 @@ fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
         UiEvent::Armed(true) => vec![("hg-armed", true), ("hg-failed", false)],
         UiEvent::Armed(false) => vec![("hg-armed", false)],
         UiEvent::Starting => vec![("hg-starting", true)],
-        UiEvent::SessionChanged(_) | UiEvent::Focus(_) => Vec::new(),
+        UiEvent::SessionChanged(_) | UiEvent::Focus(_) | UiEvent::UsernameChanged(_) => Vec::new(),
     }
 }
 
@@ -341,5 +341,6 @@ mod tests {
         assert_eq!(on(&UiEvent::Busy(false), "hg-starting"), Some(false));
         assert!(state_changes(&UiEvent::Focus(FocusTarget::Password)).is_empty());
         assert!(state_changes(&UiEvent::SessionChanged(1)).is_empty());
+        assert!(state_changes(&UiEvent::UsernameChanged("bob".into())).is_empty());
     }
 }

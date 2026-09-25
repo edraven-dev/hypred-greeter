@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Wayland,
     X11,
@@ -57,6 +58,9 @@ pub fn discover() -> Vec<Session> {
 
 fn discover_in(data_dirs: &str) -> Vec<Session> {
     let mut sessions: Vec<Session> = Vec::new();
+    // Every stem met, hidden ones included: a NoDisplay copy in an earlier
+    // dir masks the later ones, as XDG has it.
+    let mut seen: HashSet<(Kind, String)> = HashSet::new();
 
     for dir in data_dirs.split(':').filter(|d| !d.is_empty()) {
         for (sub, kind) in [("wayland-sessions", Kind::Wayland), ("xsessions", Kind::X11)] {
@@ -67,7 +71,7 @@ fn discover_in(data_dirs: &str) -> Vec<Session> {
                     continue;
                 }
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                if sessions.iter().any(|s| s.stem == stem && s.kind == kind) {
+                if !seen.insert((kind, stem.clone())) {
                     continue;
                 }
                 match std::fs::read_to_string(&path) {
@@ -82,6 +86,45 @@ fn discover_in(data_dirs: &str) -> Vec<Session> {
         }
     }
     sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    sessions
+}
+
+/// `[sessions]` only/hide, names and the X11 suffix, then the order —
+/// once, so every consumer after it sees the same list. Ids that match
+/// nothing are reported, not fatal.
+pub fn apply(
+    mut sessions: Vec<Session>,
+    cfg: &config::Sessions,
+    problems: &mut Vec<String>,
+) -> Vec<Session> {
+    let listed = [("only", &cfg.only), ("hide", &cfg.hide), ("order", &cfg.order)];
+    let names: Vec<String> = cfg.names.keys().cloned().collect();
+    for (key, ids) in listed.into_iter().chain([("names", &names)]) {
+        for id in ids.iter().filter(|id| !sessions.iter().any(|s| s.matches_cache_id(id))) {
+            problems.push(format!("sessions.{key}: `{id}` matches no installed session"));
+        }
+    }
+
+    let installed = sessions.len();
+    if !cfg.only.is_empty() {
+        sessions.retain(|s| cfg.only.iter().any(|id| s.matches_cache_id(id)));
+    }
+    sessions.retain(|s| !cfg.hide.iter().any(|id| s.matches_cache_id(id)));
+    if installed > 0 && sessions.is_empty() {
+        problems.push("sessions: `only`/`hide` leave no session".into());
+    }
+    for session in &mut sessions {
+        match cfg.names.iter().find(|(id, _)| session.matches_cache_id(id)) {
+            Some((_, name)) => session.name = name.clone(),
+            None if session.kind == Kind::X11 => session.name.push_str(&cfg.x11_suffix),
+            None => {}
+        }
+    }
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    let rank = |s: &Session| {
+        cfg.order.iter().position(|id| s.matches_cache_id(id)).unwrap_or(cfg.order.len())
+    };
+    sessions.sort_by_key(rank);
     sessions
 }
 
@@ -213,6 +256,117 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "First");
         assert_eq!(sessions[0].exec, ["one"]);
+    }
+
+    #[test]
+    fn a_hidden_copy_in_an_earlier_data_dir_masks_the_later_one() {
+        let tree = Tree::new("masking");
+        tree.write(
+            "a/wayland-sessions/hypr.desktop",
+            "[Desktop Entry]\nNoDisplay=true\nExec=one\n",
+        )
+        .write("b/wayland-sessions/hypr.desktop", "[Desktop Entry]\nName=Second\nExec=two\n")
+        .write("b/wayland-sessions/sway.desktop", "[Desktop Entry]\nName=Sway\nExec=sway\n");
+        let sessions = discover_in(&tree.dirs(&["a", "b"]));
+        let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Sway"]);
+    }
+
+    fn found(entries: &[(&str, &str, Kind)]) -> Vec<Session> {
+        entries
+            .iter()
+            .map(|(stem, name, kind)| Session {
+                name: name.to_string(),
+                exec: vec![stem.to_string()],
+                kind: *kind,
+                stem: stem.to_string(),
+                desktop_names: None,
+            })
+            .collect()
+    }
+
+    fn installed() -> Vec<Session> {
+        found(&[
+            ("hyprland", "Hyprland", Kind::Wayland),
+            ("hyprland-uwsm", "Hyprland (uwsm-managed)", Kind::Wayland),
+            ("plasma", "Plasma", Kind::X11),
+            ("sway", "Sway", Kind::Wayland),
+        ])
+    }
+
+    fn names(sessions: &[Session]) -> Vec<&str> {
+        sessions.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn apply_with_defaults_only_adds_the_x11_suffix() {
+        let mut problems = Vec::new();
+        let sessions = apply(installed(), &config::Sessions::default(), &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        let expected = ["Hyprland", "Hyprland (uwsm-managed)", "Plasma (X11)", "Sway"];
+        assert_eq!(names(&sessions), expected);
+    }
+
+    #[test]
+    fn apply_only_and_hide_filter_by_id() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions {
+            only: vec!["wayland/hyprland-uwsm".into(), "x11/plasma".into(), "wayland/sway".into()],
+            hide: vec!["wayland/sway".into()],
+            x11_suffix: String::new(),
+            ..Default::default()
+        };
+        let sessions = apply(installed(), &cfg, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(names(&sessions), ["Hyprland (uwsm-managed)", "Plasma"]);
+    }
+
+    #[test]
+    fn apply_renames_then_orders_the_listed_first_and_the_rest_by_name() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions {
+            order: vec!["wayland/sway".into(), "wayland/hyprland-uwsm".into()],
+            names: [("x11/plasma".to_string(), "KDE".to_string())].into(),
+            ..Default::default()
+        };
+        let sessions = apply(installed(), &cfg, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(names(&sessions), ["Sway", "Hyprland (uwsm-managed)", "Hyprland", "KDE"]);
+        assert_eq!(sessions[1].cache_id(), "wayland/hyprland-uwsm");
+    }
+
+    #[test]
+    fn apply_reports_ids_that_match_nothing() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions {
+            only: vec!["wayland/hyprland".into(), "wayland/gnome".into()],
+            hide: vec!["x11/i3".into()],
+            order: vec!["wayland/typo".into()],
+            names: [("wayland/nope".to_string(), "Nope".to_string())].into(),
+            ..Default::default()
+        };
+        let sessions = apply(installed(), &cfg, &mut problems);
+        assert_eq!(names(&sessions), ["Hyprland"]);
+        problems.sort();
+        let expected = [
+            "sessions.hide: `x11/i3` matches no installed session",
+            "sessions.names: `wayland/nope` matches no installed session",
+            "sessions.only: `wayland/gnome` matches no installed session",
+            "sessions.order: `wayland/typo` matches no installed session",
+        ];
+        assert_eq!(problems, expected);
+    }
+
+    #[test]
+    fn a_filter_that_leaves_nothing_is_reported() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions { only: vec!["wayland/nope".into()], ..Default::default() };
+        assert!(apply(installed(), &cfg, &mut problems).is_empty());
+        let expected = [
+            "sessions.only: `wayland/nope` matches no installed session",
+            "sessions: `only`/`hide` leave no session",
+        ];
+        assert_eq!(problems, expected);
     }
 
     #[test]
