@@ -24,12 +24,14 @@ window.hg-window {
   padding: 8px 16px;
 }
 
-/* the default layout's login card (`name = "card"`) */
+/* the default layout's login card (`name = "card"`): a share of the screen, not of
+   the text — messages of any length wrap inside it (--hg-vw is 1 % of the window) */
 #card {
   background-color: alpha(#000000, 0.35);
   border: 1px solid alpha(@muted, 0.35);
   border-radius: 16px;
   padding: 28px 32px;
+  min-width: calc(var(--hg-vw) * 23);
 }
 
 /* a widget that failed to build renders as an inline ⚠ placeholder */

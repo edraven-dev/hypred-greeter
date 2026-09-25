@@ -153,10 +153,14 @@ fn main() {
         window.set_widget_name("hg-window");
         window.set_child(Some(&ui::window_content(&problems, root)));
         if args.demo {
+            // No title bar: the published viewport is the surface's size,
+            // and the live greeter has none either.
+            window.set_decorated(false);
             window.set_default_size(1280, 800);
         } else {
             window.fullscreen();
         }
+        ui::publish_viewport(&window);
         window.present();
 
         // Capture phase: sees every key/pointer event before a child can

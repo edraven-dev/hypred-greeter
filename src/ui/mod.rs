@@ -52,6 +52,48 @@ pub fn load_css(path: &Path) -> Vec<String> {
     problems
 }
 
+/// GTK CSS has no viewport units, so nothing in a stylesheet could be sized
+/// relative to the screen. The window's size is published as custom
+/// properties instead — `--hg-vw`/`--hg-vh` (1 % of its width/height),
+/// `--hg-vmin`/`--hg-vmax` — kept current as it changes:
+/// `#card { min-width: calc(var(--hg-vw) * 25); }`. Below USER priority, so
+/// a stylesheet may even set its own (vmin/vmax follow, they are derived
+/// in CSS). Never larger than the monitor: a windowed demo whose content
+/// asks for more than the window would otherwise grow without end. The
+/// frame right after a resize is laid out with the previous values.
+pub fn publish_viewport(window: &gtk::ApplicationWindow) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(&viewport_css(0, 0));
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().expect("no display"),
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    window.connect_realize(move |window| {
+        let Some(surface) = window.surface() else { return };
+        let provider = provider.clone();
+        let update = move |surface: &gtk::gdk::Surface| {
+            let (mut width, mut height) = (surface.width(), surface.height());
+            if let Some(monitor) = surface.display().monitor_at_surface(surface) {
+                let screen = monitor.geometry();
+                (width, height) = (width.min(screen.width()), height.min(screen.height()));
+            }
+            provider.load_from_string(&viewport_css(width, height));
+        };
+        update(&surface);
+        surface.connect_width_notify(update.clone());
+        surface.connect_height_notify(update);
+    });
+}
+
+fn viewport_css(width: i32, height: i32) -> String {
+    let (vw, vh) = (f64::from(width.max(0)) / 100.0, f64::from(height.max(0)) / 100.0);
+    format!(
+        "window.hg-window {{ --hg-vw: {vw}px; --hg-vh: {vh}px; \
+         --hg-vmin: min(var(--hg-vw), var(--hg-vh)); --hg-vmax: max(var(--hg-vw), var(--hg-vh)); }}"
+    )
+}
+
 pub fn apply_gtk_settings(cfg: &config::Gtk) {
     let Some(settings) = gtk::Settings::default() else {
         error!("no gtk settings on default display");
@@ -71,5 +113,19 @@ pub fn apply_gtk_settings(cfg: &config::Gtk) {
     }
     if let Some(font) = &cfg.font {
         settings.set_gtk_font_name(Some(font));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_units_are_a_hundredth_of_the_window() {
+        let css = viewport_css(1800, 1125);
+        assert!(css.starts_with("window.hg-window { --hg-vw: 18px; --hg-vh: 11.25px; "), "{css}");
+        assert!(css.contains("--hg-vmin: min(var(--hg-vw), var(--hg-vh));"), "{css}");
+        assert!(css.contains("--hg-vmax: max(var(--hg-vw), var(--hg-vh));"), "{css}");
+        assert!(viewport_css(0, -4).contains("--hg-vw: 0px; --hg-vh: 0px;"));
     }
 }
