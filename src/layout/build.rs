@@ -84,6 +84,17 @@ fn apply_common(widget: &gtk::Widget, node: &Node) {
     if let Some(visible) = common.visible {
         widget.set_visible(visible);
     }
+    if let Some(focusable) = common.focusable {
+        widget.set_focusable(focusable);
+        if !focusable {
+            widget.set_can_focus(false);
+        }
+    }
+    if common.focus == Some(true) {
+        widget.connect_map(|widget| {
+            widget.grab_focus();
+        });
+    }
 }
 
 fn request_size(

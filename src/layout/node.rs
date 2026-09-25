@@ -51,6 +51,9 @@ pub struct Common {
     pub width: Option<Size>,
     pub height: Option<Size>,
     pub visible: Option<bool>,
+    /// Grab focus once mapped.
+    pub focus: Option<bool>,
+    pub focusable: Option<bool>,
 }
 
 pub struct Props {
@@ -96,6 +99,16 @@ impl Props {
             None => Ok(None),
             Some(toml::Value::Boolean(b)) => Ok(Some(*b)),
             Some(other) => Err(WidgetError::bad_prop(key, "a boolean", other)),
+        }
+    }
+
+    /// `xalign = 1` is as valid as `xalign = 0.5`.
+    pub fn float(&self, key: &str) -> Result<Option<f64>, WidgetError> {
+        match self.raw(key) {
+            None => Ok(None),
+            Some(toml::Value::Float(f)) => Ok(Some(*f)),
+            Some(toml::Value::Integer(n)) => Ok(Some(*n as f64)),
+            Some(other) => Err(WidgetError::bad_prop(key, "a number", other)),
         }
     }
 
@@ -146,6 +159,15 @@ mod tests {
         assert_eq!(p.str_or("missing", "x").unwrap(), "x");
         assert_eq!(p.int("spacing").unwrap(), Some(4));
         assert_eq!(p.bool("wrap").unwrap(), Some(true));
+    }
+
+    #[test]
+    fn floats_take_integers_too() {
+        let p = props("half = 0.5\nright = 1\nword = \"x\"\n");
+        assert_eq!(p.float("half").unwrap(), Some(0.5));
+        assert_eq!(p.float("right").unwrap(), Some(1.0));
+        assert_eq!(p.float("missing").unwrap(), None);
+        assert!(p.float("word").is_err());
     }
 
     #[test]

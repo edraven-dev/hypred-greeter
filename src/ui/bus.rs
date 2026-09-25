@@ -20,6 +20,17 @@ pub enum UiEvent {
     AuthError(String),
     Busy(bool),
     SessionChanged(usize),
+    /// A passive (eager) conversation is open and nothing was submitted.
+    Armed(bool),
+    /// The session is being started (after auth success).
+    Starting,
+    Focus(FocusTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    Username,
+    Password,
 }
 
 type Subscriber = Rc<dyn Fn(&UiEvent)>;

@@ -57,8 +57,8 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 |---|---|---|
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
-| `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font` | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)) | `false`, `0` |
+| `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (`dark` is then off: GTK has no Empty-dark) | unset (GTK defaults) |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, `30`, `400` |
 | `[commands]` | `reboot`, `poweroff` (argv arrays) | `["systemctl", ...]` |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`) | `["startx", "/usr/bin/env"]`, `[]`, first by name |
 
@@ -79,14 +79,12 @@ widget = "background"
 [[root.children]]
 widget = "clock"
 format = "%A %e %B  %H:%M"
-anchor = "top"
-margin = [48, 0, 0, 0]
+anchor = "top"                # its offset: .hg-clock { margin-top: 48px } in style.css
 
 [[root.children]]
 widget = "box"
-name = "card"                 # style it as #card
+name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px }
 orientation = "vertical"
-spacing = 12
 anchor = "center"
 
   [[root.children.children]]
@@ -102,7 +100,22 @@ or array, extra CSS classes), `halign`/`valign` (`start`/`center`/`end`/
 `hexpand`/`vexpand`, `margin` (int or `[top, right, bottom, left]`),
 `width`/`height` (pixels, or a share of the window such as `"26%"`; sizing
 from the stylesheet with the `--hg-vw` variables is the way meant for
-themes — see style.css below), `visible`.
+themes — see style.css below), `visible`, `focus` (takes the focus once
+shown; without it the username entry gets it when no user is known, else the
+password), `focusable = false` (skipped by Tab and clicks — for a widget that
+must not take the focus from the entries).
+
+`spacing` and `margin` given in TOML are floors the stylesheet only adds to;
+prefer `border-spacing` and `margin` in style.css, where a theme can change
+them (the built-in layout sets none).
+
+**Upgrading from 0.2.** The built-in layout used to carry its gaps and
+offsets. A stylesheet kept from 0.2 next to the new layout.toml gets none of
+them; a layout.toml copied from 0.2 next to the new style.css gets them
+twice. Add to a custom stylesheet what the default one now has — `#card {
+border-spacing: 12px }`, `.hg-clock { margin-top: 48px }`, `.hg-power {
+margin: 0 24px 24px 0; border-spacing: 8px }` — and drop `spacing`/`margin`
+from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 
 **Widgets:**
 
@@ -113,12 +126,19 @@ themes — see style.css below), `visible`.
 | `grid` | `row-spacing`, `column-spacing`; children take `col`, `row`, `col-span`, `row-span` | container |
 | `label` | `text`, `wrap`, `max-width-chars` | static text; a wrapping label asks for its one-line width unless capped |
 | `background` | `image`, `fit` | wallpaper; defaults from `[background]` |
-| `clock` | `format` (strftime) | ticks every second |
-| `username` | `placeholder` | prefilled with the last user |
-| `password` | `placeholder`, `peek` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
-| `message` | `text`, `max-width-chars` (30) | PAM info/errors land here, wrapped to the container's width; info is shown after a 250 ms settle |
+| `clock` | `format` (strftime), text properties | ticks every second |
+| `username` | `placeholder`, `xalign` | prefilled with the last user; Enter moves on to the password |
+| `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
+| `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
 | `session` | — | dropdown over wayland-sessions + xsessions |
-| `power` | `reboot-label`, `poweroff-label`, `spacing` | runs `[commands]` |
+| `power` | `reboot-label`, `poweroff-label`, `spacing` (0) | runs `[commands]` |
+
+**Text properties** (`clock`, `message`): `xalign` (0.0 left … 1.0 right,
+within the space the widget gets), `justify` (`left`/`center`/`right`/`fill`,
+for wrapped lines), `ellipsize` (`none`/`start`/`middle`/`end`), `lines` (with
+`ellipsize`: at most that many lines), `markup` (the text is Pango markup:
+`format = "<b>%H</b>:%M"`; a text with a bare `&` or `<` fails to parse and
+is skipped, so leave it off `message`, which shows PAM's texts).
 
 ### style.css — every selector you need
 
@@ -127,8 +147,9 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 
 | selector | matches |
 |---|---|
-| `window.hg-window` | the greeter window |
-| `.hg-banner` | the config-problem banner |
+| `window.hg-window` | the greeter window (carries the [state classes](#state-classes)) |
+| `.hg-banner`, `#hg-banner` | the config-problem banner |
+| `.hg-root-column`, `#hg-root-column` | the column holding banner + root (only while there is a banner) |
 | `.hg-error` | inline ⚠ placeholder for a widget that failed to build |
 | `.hg-box`, `.hg-overlay`, `.hg-grid`, `.hg-label` | containers / labels |
 | `.hg-background` | the wallpaper picture |
@@ -136,14 +157,15 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 | `entry.hg-username` | username entry |
 | `entry.hg-password` | password entry (GtkPasswordEntry) |
 | `entry.hg-password.hg-password-busy` | … while a submitted password is on its way (read-only) |
-| `.hg-message`, `.hg-message.hg-message-error` | PAM messages / auth errors |
+| `.hg-message`, `.hg-message.hg-message-error` | PAM messages / auth errors (also `-info`, `-prompt`, `-empty` — see state classes) |
 | `dropdown.hg-session`, `dropdown.hg-session > button` | session picker |
 | `.hg-power button`, `#hg-power-reboot`, `#hg-power-poweroff` | power buttons |
 | `#card` (or any `name` you set) | your named widgets |
 
 GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
-Parse errors are logged with file:line:col and skipped, never fatal.
+Parse errors are skipped, never fatal: each is logged and shown in the banner
+as `style.css:3:6: …` (the first five; the rest are counted).
 
 **Sizes relative to the screen.** GTK CSS has no `%`/`vw` units for sizes,
 so the greeter publishes the window's size as custom properties on
@@ -163,6 +185,51 @@ keeps such a rule fixed at 18 px per unit instead of dropping it. The frame
 right after a resize is laid out with the previous values. (`width`/`height`
 in layout.toml take `"25%"` too, border-box, for layouts that would rather
 not touch CSS.)
+
+### State classes
+
+Toggled on `window.hg-window` as things happen, so any descendant can react
+(`.hg-failed #card { border-color: @danger; }`), plus one at a time on the
+message label:
+
+| class | while |
+|---|---|
+| `.hg-busy` | a submitted password is on its way |
+| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm or submission; a failure while it is on drops it for a frame, so an `animation:` on it restarts on every failure |
+| `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
+| `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
+| `.hg-starting` | the session is being started (stays until the greeter exits) |
+| `.hg-caps-lock` | Caps Lock is on |
+| `.hg-demo` | running with `--demo` |
+| `.hg-problems` | the banner is shown |
+| `.hg-message-empty`, `.hg-message-info`, `.hg-message-error`, `.hg-message-prompt` | on the message label: what it shows — exactly one at a time; a repeated error drops `-error` and retakes it a frame later, so an `animation:` on it restarts |
+
+### Parts inside widgets
+
+GTK widgets are made of sub-nodes, addressable as descendants (verified on
+GTK 4.22):
+
+| selector | part |
+|---|---|
+| `entry.hg-password > text > placeholder`, `entry.hg-username > text > placeholder` | the placeholder text |
+| `entry > text > selection` | selected text |
+| `entry.hg-password > image` | the peek (eye) icon |
+| `entry.hg-password > image.caps-lock-indicator` | the caps-lock warning |
+| `dropdown.hg-session > button`, `dropdown.hg-session > button arrow` | the picker's button and its arrow |
+| `dropdown.hg-session popover > contents` | the open list's frame |
+| `dropdown.hg-session popover listview > row` (+ `:selected`, `:hover`), `dropdown.hg-session popover listview > row image` | a list row; its checkmark |
+| `entry.hg-password:focus-within`, `*:focus-visible` | focus — draw the ring with `outline` and `outline-offset` |
+
+### What GTK CSS does not do
+
+| not in GTK CSS | do this instead |
+|---|---|
+| `width`, `height`, `max-width` | `min-width`/`min-height` (with `--hg-vw` for a share of the screen), `max-width-chars` on text widgets, `width`/`height` in layout.toml |
+| `%`, `vw`, `vh` units | `calc(var(--hg-vw) * 25)` |
+| `text-align` | `xalign`/`justify` on the widget in layout.toml |
+| `display: none` | `visible = false` in layout.toml, `hide-empty` on the message; `opacity: 0` hides but keeps the space |
+| `cursor` | `[gtk] cursor-theme`; the pointer shape is the widget's |
+| `:has()`, `:empty` | the state classes above (`.hg-info`, `.hg-message-empty`) |
 
 ## Writing a widget (addons)
 
@@ -194,8 +261,8 @@ possible later without breaking existing widgets.
   (the same cycle ending in a match), and password `fail` for the error
   path.
 - **Two kinds of error**: a PAM error message mid-conversation ("Failed to
-  match fingerprint") is `PamError` — shown in red for at least 1.5 s, the
-  entry is left alone, the conversation goes on. Only a failed conversation
+  match fingerprint") is `PamError` — shown in red for at least 1.5 s
+  (`error-hold-ms`), the entry is left alone, the conversation goes on. Only a failed conversation
   you submitted to (`AuthError`) clears and refocuses the password entry; one
   that fails on its own (pam_nologin) is reported like a PAM error.
 - **State**: `/var/lib/hypred-greeter/state-vt<N>.toml` — one file per VT
@@ -214,8 +281,8 @@ possible later without breaking existing widgets.
 With `pam_fprintd.so` ahead of the password modules in `/etc/pam.d/greetd`,
 `[auth] eager = true` opens the PAM conversation as soon as a username is
 known — the remembered user at startup, or the username entry once typing
-settles (400 ms) or on Enter — so the reader is armed the moment the
-greeter appears.
+settles (`username-debounce-ms`, 400 ms) or on Enter — so the reader is
+armed the moment the greeter appears.
 
 **With a remembered user and session a touch is the whole login** — no
 Enter, no click, no key: the greeter comes up with both preselected (the
@@ -253,8 +320,8 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
 
   Typing into the password entry pauses all of it: while the entry holds
   text the parked prompt is kept ready, so a password typed then goes
-  through at once — for 30 s after the last key; a stray character left in
-  the entry does not switch the reader off for good. A conversation that
+  through at once — for `typing-hold` (30 s) after the last key; a stray
+  character left in the entry does not switch the reader off for good. A conversation that
   ends without a fingerprint cycle — a failed login, or a park at once
   because the reader was claimed elsewhere or not up yet — is reopened by
   timer, so a touch works again without any input: after 3 s, doubling up

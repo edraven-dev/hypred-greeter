@@ -18,6 +18,9 @@ mod widgets;
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use std::rc::Rc;
+use std::time::Duration;
+
+use ui::bus::{FocusTarget, UiEvent};
 
 fn main() {
     // A panic unwinding into the GTK main loop wedges the process without
@@ -134,7 +137,8 @@ fn main() {
             },
         );
 
-        let handle = ui::ctx::AppHandle::new(auth, bus, shared);
+        let debounce = Duration::from_millis(loaded.config.auth.username_debounce_ms);
+        let handle = ui::ctx::AppHandle::new(auth, bus, shared, debounce);
 
         let registry = widgets::Registry::builtin();
         let ctx = ui::ctx::BuildCtx::new(
@@ -146,12 +150,20 @@ fn main() {
         );
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
+        let focus_placed = layout::requests_focus(&layout.root);
 
         let window =
             gtk::ApplicationWindow::builder().application(app).title("hypred-greeter").build();
         window.add_css_class("hg-window");
         window.set_widget_name("hg-window");
+        if args.demo {
+            window.add_css_class("hg-demo");
+        }
+        if !problems.is_empty() {
+            window.add_css_class("hg-problems");
+        }
         window.set_child(Some(&ui::window_content(&problems, root)));
+        ui::track_states(&window, &handle.bus);
         if args.demo {
             // No title bar: the published viewport is the surface's size,
             // and the live greeter has none either.
@@ -161,6 +173,16 @@ fn main() {
             window.fullscreen();
         }
         ui::publish_viewport(&window);
+        // Before present: GTK would otherwise focus the first entry on show
+        // (selecting its text) before the focus moves on.
+        if !focus_placed {
+            let target = if handle.username().is_empty() {
+                FocusTarget::Username
+            } else {
+                FocusTarget::Password
+            };
+            handle.emit(&UiEvent::Focus(target));
+        }
         window.present();
 
         // Capture phase: sees every key/pointer event before a child can

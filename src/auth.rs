@@ -42,9 +42,6 @@ const RETRY_CAP: Duration = Duration::from_secs(60);
 /// Timer retries per run of such ends unless rearm-window is "always";
 /// input re-arms regardless.
 const RETRY_LIMIT: u32 = 3;
-/// Text in the password entry keeps a parked prompt ready only this long
-/// after the last input — a stray key must not switch the reader off.
-const TYPING_HOLD: Duration = Duration::from_secs(30);
 /// How often a greeter that is off screen looks whether it is back.
 const SEAT_POLL: Duration = Duration::from_secs(1);
 
@@ -93,6 +90,8 @@ pub struct Auth {
     pending_rearm: Cell<bool>,
     /// The password entry holds text: a parked prompt is kept ready for it.
     typing: Cell<bool>,
+    /// What the UI was last told about `.hg-armed`.
+    armed: Cell<bool>,
     /// Consecutive conversations that ended without a fingerprint cycle.
     quick_ends: Cell<u32>,
     /// Bumped by every open(), which makes a retry timer armed before it
@@ -138,11 +137,12 @@ impl Auth {
             last_restart: Cell::new(None),
             pending_rearm: Cell::new(false),
             typing: Cell::new(false),
+            armed: Cell::new(false),
             quick_ends: Cell::new(0),
             retry_token: Cell::new(0),
             retry_base: Cell::new(RETRY_BASE),
             retry_cap: Cell::new(RETRY_CAP),
-            typing_hold: Cell::new(TYPING_HOLD),
+            typing_hold: Cell::new(Duration::from_secs(options.typing_hold)),
             seat_poll: Cell::new(SEAT_POLL),
             seat_waiting: Cell::new(false),
             hooks,
@@ -253,9 +253,22 @@ impl Auth {
                 *stash = Some(password);
                 *passive = false;
                 drop(phase);
+                self.sync_armed();
                 self.bus.emit(&UiEvent::Busy(true));
             }
             Phase::Starting => {}
+        }
+    }
+
+    /// Armed: a passive conversation waits on the module with nothing
+    /// submitted — a touch alone would log in. Told once per change.
+    fn sync_armed(&self) {
+        let armed = matches!(
+            *self.phase.borrow(),
+            Phase::Conversing { passive: true, awaiting_input: false, .. }
+        );
+        if self.armed.replace(armed) != armed {
+            self.bus.emit(&UiEvent::Armed(armed));
         }
     }
 
@@ -283,6 +296,7 @@ impl Auth {
                 *stash = None;
                 *passive = true;
                 drop(phase);
+                self.sync_armed();
                 self.bus.emit(&UiEvent::Busy(false));
             }
             Phase::Conversing { passive: true, .. } | Phase::Idle | Phase::Starting => {}
@@ -461,6 +475,7 @@ impl Auth {
         };
         *self.phase.borrow_mut() = Phase::Idle;
         self.abandon_conversation();
+        self.sync_armed();
         if submitted {
             self.bus.emit(&UiEvent::Busy(false));
         }
@@ -478,6 +493,7 @@ impl Auth {
             saw_info: false,
             started: Instant::now(),
         };
+        self.sync_armed();
         self.send(Request::CreateSession { username: user });
     }
 
@@ -521,6 +537,7 @@ impl Auth {
                 );
                 *self.phase.borrow_mut() = Phase::Idle;
                 self.abandon_conversation();
+                self.sync_armed();
                 self.pending_rearm.set(self.eager);
                 if submitted {
                     // Busy(false) first, so the entry is editable again when
@@ -575,6 +592,7 @@ impl Auth {
             }
             _ => false,
         };
+        self.sync_armed();
         self.bus.emit(&UiEvent::Busy(false));
         self.bus.emit(&UiEvent::Prompt { secret, text, passive });
         if passive {
@@ -584,6 +602,7 @@ impl Auth {
 
     fn handle_success(&self) {
         let phase = std::mem::replace(&mut *self.phase.borrow_mut(), Phase::Idle);
+        self.sync_armed();
         match phase {
             Phase::Conversing { user, passive, .. } => {
                 let shown = (self.hooks.current_username)();
@@ -612,6 +631,7 @@ impl Auth {
                 info!("authenticated; starting session: {}", cmd.join(" "));
                 *self.phase.borrow_mut() = Phase::Starting;
                 self.bus.emit(&UiEvent::Busy(true));
+                self.bus.emit(&UiEvent::Starting);
                 self.send(Request::StartSession { cmd, env });
             }
             Phase::Starting => {
@@ -719,6 +739,9 @@ mod tests {
                     UiEvent::AuthError(text) => format!("autherror {text}"),
                     UiEvent::Busy(busy) => format!("busy {busy}"),
                     UiEvent::SessionChanged(index) => format!("session {index}"),
+                    UiEvent::Armed(armed) => format!("armed {armed}"),
+                    UiEvent::Starting => "starting".into(),
+                    UiEvent::Focus(target) => format!("focus {target:?}"),
                 });
             });
             let auth = Auth::start(
@@ -756,12 +779,14 @@ mod tests {
     fn eager(rearm_window: u64) -> config::Auth {
         let rearm_window =
             if rearm_window == 0 { Rearm::Never } else { Rearm::Window(rearm_window) };
-        config::Auth { eager: true, rearm_window }
+        config::Auth { eager: true, rearm_window, ..config::Auth::default() }
     }
 
     fn eager_always() -> config::Auth {
-        config::Auth { eager: true, rearm_window: Rearm::Always }
+        config::Auth { eager: true, rearm_window: Rearm::Always, ..config::Auth::default() }
     }
+
+    const TYPING_HOLD: Duration = Duration::from_secs(30);
 
     /// Pumps until `done` holds, for at most two seconds.
     fn pump_until(pump: &dyn Fn(), done: impl Fn() -> bool) -> bool {
@@ -875,6 +900,7 @@ mod tests {
             "info Place your right thumb on the fingerprint reader",
             "info Verification timed out",
             "busy true",
+            "starting",
             "info demo: session would start now",
             "busy false",
         ];
@@ -891,8 +917,11 @@ mod tests {
             pump();
         });
         let expected = [
+            "armed true",
             "info Place your right thumb on the fingerprint reader",
+            "armed false",
             "busy true",
+            "starting",
             "info demo: session would start now",
             "busy false",
         ];
@@ -956,8 +985,63 @@ mod tests {
             pump();
             assert!(auth.accepting_input() == AcceptState::Prompted);
         });
-        assert_eq!(log, ["busy false", "prompt[true,passive] Password:"]);
+        let parked = ["armed true", "armed false", "busy false", "prompt[true,passive] Password:"];
+        assert_eq!(log, parked);
         assert_eq!(requests(&seen), ["create edraven"]);
+    }
+
+    #[test]
+    fn a_passive_conversation_is_armed_until_it_parks() {
+        let (backend, _, _) = scripted(fprint);
+        let log = drive_with(backend, eager(0), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        let expected = [
+            "armed true",
+            "info Place your finger",
+            "info Verification timed out",
+            "armed false",
+            "busy false",
+            "prompt[true,passive] Password:",
+        ];
+        assert_eq!(log, expected);
+    }
+
+    #[test]
+    fn a_submitted_password_disarms_and_escape_arms_again() {
+        let (backend, _, gate) = scripted(fprint_gated);
+        let log = drive_with(backend, eager(0), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            auth.submit("pw again".into());
+            auth.cancel();
+            gate.release();
+            pump();
+        });
+        let armed: Vec<&String> = log.iter().filter(|e| e.starts_with("armed")).collect();
+        assert_eq!(armed, ["armed true", "armed false", "armed true", "armed false"], "{log:?}");
+        let parked = log.iter().position(|e| e.starts_with("prompt")).unwrap();
+        assert_eq!(log[parked - 2], "armed false", "{log:?}");
+    }
+
+    #[test]
+    fn starting_is_told_right_before_the_session_starts() {
+        let (backend, seen, _) = scripted(password_only);
+        let log = drive_with(backend, config::Auth::default(), |auth, pump| {
+            auth.begin("edraven".into(), "pw".into());
+            pump();
+        });
+        assert_eq!(requests(&seen), ["create edraven", "respond Some(\"pw\")", "start true"]);
+        let expected = [
+            "busy true",
+            "busy true",
+            "starting",
+            "info demo: session would start now",
+            "busy false",
+        ];
+        assert_eq!(log, expected);
     }
 
     #[test]
@@ -1270,7 +1354,16 @@ mod tests {
             pump();
         });
         assert_eq!(requests(&seen), ["create alice", "cancel", "create bob"]);
-        assert_eq!(log, ["info ", "busy false", "prompt[true,passive] Password:"]);
+        let expected = [
+            "armed true",
+            "armed false",
+            "info ",
+            "armed true",
+            "armed false",
+            "busy false",
+            "prompt[true,passive] Password:",
+        ];
+        assert_eq!(log, expected);
     }
 
     #[test]
@@ -1309,10 +1402,14 @@ mod tests {
         });
         assert_eq!(requests(&seen), ["create edraven", "respond None", "cancel", "create bob"]);
         let expected = [
+            "armed true",
             "info Place your finger",
+            "armed false",
             "busy true",
             "busy false",
             "info ",
+            "armed true",
+            "armed false",
             "busy false",
             "prompt[true,passive] Password:",
         ];
@@ -1332,7 +1429,9 @@ mod tests {
             assert!(auth.accepting_input() == AcceptState::Fresh);
         });
         assert_eq!(requests(&seen), ["create edraven", "cancel"]);
-        assert_eq!(log, ["busy false", "prompt[true,passive] Password:", "info "]);
+        let expected =
+            ["armed true", "armed false", "busy false", "prompt[true,passive] Password:", "info "];
+        assert_eq!(log, expected);
     }
 
     #[test]
@@ -1394,7 +1493,8 @@ mod tests {
             pump();
         });
         assert_eq!(requests(&seen), ["create edraven", "cancel", "create edraven", "cancel"]);
-        assert_eq!(log, ["pamerror nologin", "pamerror nologin"]);
+        let quiet = ["armed true", "armed false", "pamerror nologin"];
+        assert_eq!(log, [&quiet[..], &quiet[..]].concat());
     }
 
     #[test]
@@ -1457,10 +1557,14 @@ mod tests {
         });
         assert_eq!(requests(&seen), ["create edraven", "respond None", "respond None"]);
         let expected = [
+            "armed true",
             "info Place your finger",
+            "armed false",
             "busy true",
+            "armed true",
             "busy false",
             "info Verification timed out",
+            "armed false",
             "busy false",
             "prompt[true,passive] Password:",
         ];
@@ -1478,7 +1582,8 @@ mod tests {
             assert!(auth.accepting_input() == AcceptState::Prompted);
         });
         assert_eq!(requests(&seen), ["create edraven"]);
-        assert_eq!(log, ["busy false", "prompt[true,passive] Password:"]);
+        let parked = ["armed true", "armed false", "busy false", "prompt[true,passive] Password:"];
+        assert_eq!(log, parked);
     }
 
     #[test]
@@ -1494,6 +1599,7 @@ mod tests {
             pump();
         });
         assert_eq!(requests(&seen), ["create edraven"]);
-        assert_eq!(log, ["busy false", "prompt[true,passive] Password:"]);
+        let parked = ["armed true", "armed false", "busy false", "prompt[true,passive] Password:"];
+        assert_eq!(log, parked);
     }
 }

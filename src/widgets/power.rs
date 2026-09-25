@@ -16,7 +16,7 @@ impl WidgetDef for PowerDef {
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
         let row = gtk::Box::new(
             gtk::Orientation::Horizontal,
-            node.props.int("spacing")?.unwrap_or(8) as i32,
+            node.props.int("spacing")?.unwrap_or(0) as i32,
         );
         for (id, label_key, default_label, command) in [
             ("hg-power-reboot", "reboot-label", "Reboot", ctx.config.commands.reboot.clone()),

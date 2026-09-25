@@ -35,6 +35,12 @@ eager = false
 # touch logs in whenever you walk up; N — for N seconds after the last
 # input, then on the next input; 0 — never.
 rearm-window = 0
+# Text left in the password entry keeps a parked prompt ready (no re-arm)
+# for this many seconds after the last input.
+typing-hold = 30
+# How long the username entry has to settle before an eager conversation
+# opens for the name typed.
+username-debounce-ms = 400
 
 [commands]
 reboot = ["systemctl", "reboot"]
