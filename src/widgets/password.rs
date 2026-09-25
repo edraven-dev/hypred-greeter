@@ -1,16 +1,17 @@
 //! Visible (non-secret) PAM prompts are answered here too, masked; their
-//! prompt text shows via the message widget. A mid-conversation PAM error
-//! ("Failed to match fingerprint") leaves the entry alone — only a failed
-//! conversation wipes it. While the entry holds text, auth keeps a parked
-//! prompt ready for it instead of re-arming the fingerprint reader.
+//! prompt text shows via the message widget (or, with `prompt-placeholder`,
+//! as this entry's placeholder). A mid-conversation PAM error ("Failed to
+//! match fingerprint") leaves the entry alone — only a failed conversation
+//! wipes it. While the entry holds text, auth keeps a parked prompt ready
+//! for it instead of re-arming the fingerprint reader.
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
 
 use crate::layout::Node;
-use crate::ui::bus::UiEvent;
+use crate::ui::bus::{FocusTarget, UiEvent};
 use crate::ui::ctx::BuildCtx;
-use crate::widgets::{WidgetDef, WidgetError};
+use crate::widgets::{apply_entry_props, is_default_prompt, WidgetDef, WidgetError};
 
 pub struct PasswordDef;
 
@@ -20,11 +21,14 @@ impl WidgetDef for PasswordDef {
     }
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
+        let placeholder = node.props.str_or("placeholder", "password")?;
+        let prompt_placeholder = node.props.bool("prompt-placeholder")?.unwrap_or(false);
         let entry = gtk::PasswordEntry::builder()
-            .placeholder_text(node.props.str_or("placeholder", "password")?)
+            .placeholder_text(placeholder.as_str())
             .show_peek_icon(node.props.bool("peek")?.unwrap_or(true))
             .activates_default(false)
             .build();
+        apply_entry_props(&entry, node)?;
 
         let app = ctx.app.clone();
         entry.connect_changed(move |entry| app.auth.set_typing(!entry.text().is_empty()));
@@ -37,10 +41,6 @@ impl WidgetDef for PasswordDef {
             }
             entry.set_text("");
             app.submit_response(&text);
-        });
-
-        entry.connect_map(|entry| {
-            entry.grab_focus();
         });
 
         let app = ctx.app.clone();
@@ -62,6 +62,14 @@ impl WidgetDef for PasswordDef {
         let weak = entry.downgrade();
         ctx.bus.subscribe(move |event| {
             let Some(entry) = weak.upgrade() else { return };
+            // A pending non-default prompt ("New password:") stands in for
+            // the placeholder; anything that ends it puts the own one back.
+            let placeholder_for = |prompt: Option<&str>| {
+                if prompt_placeholder {
+                    let text = prompt.filter(|text| !is_default_prompt(text));
+                    entry.set_placeholder_text(Some(text.unwrap_or(&placeholder)));
+                }
+            };
             match event {
                 // Read-only rather than insensitive: an insensitive entry
                 // drops focus and ignores keys, so Escape could not take back
@@ -70,6 +78,7 @@ impl WidgetDef for PasswordDef {
                     entry.set_editable(!busy);
                     if *busy {
                         entry.add_css_class("hg-password-busy");
+                        placeholder_for(None);
                     } else {
                         entry.remove_css_class("hg-password-busy");
                     }
@@ -77,14 +86,27 @@ impl WidgetDef for PasswordDef {
                 UiEvent::AuthError(_) => {
                     entry.set_text("");
                     entry.grab_focus();
+                    placeholder_for(None);
                 }
-                UiEvent::Prompt { passive: false, .. } => {
+                UiEvent::Prompt { text, passive, .. } => {
+                    placeholder_for(Some(text));
+                    if !*passive {
+                        entry.grab_focus();
+                    }
+                }
+                UiEvent::Info(text) => {
+                    if text.is_empty() {
+                        placeholder_for(None);
+                    }
+                }
+                UiEvent::Focus(FocusTarget::Password) => {
                     entry.grab_focus();
                 }
-                UiEvent::Prompt { passive: true, .. }
-                | UiEvent::Info(_)
+                UiEvent::Focus(FocusTarget::Username)
                 | UiEvent::PamError(_)
-                | UiEvent::SessionChanged(_) => {}
+                | UiEvent::SessionChanged(_)
+                | UiEvent::Armed(_)
+                | UiEvent::Starting => {}
             }
         });
         Ok(entry.upcast())

@@ -4,7 +4,7 @@ use gtk4::prelude::*;
 
 use crate::layout::Node;
 use crate::ui::ctx::BuildCtx;
-use crate::widgets::{WidgetDef, WidgetError};
+use crate::widgets::{apply_text_props, WidgetDef, WidgetError};
 
 pub struct ClockDef;
 
@@ -24,6 +24,7 @@ impl WidgetDef for ClockDef {
         };
 
         let label = gtk::Label::new(Some(&text));
+        apply_text_props(&label, node)?;
         let weak = label.downgrade();
         glib::timeout_add_seconds_local(1, move || match weak.upgrade() {
             Some(label) => {
