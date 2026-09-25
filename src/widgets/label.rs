@@ -68,9 +68,11 @@ impl Template {
                         literal.push_str(&format!("{{{name}"));
                         continue;
                     }
-                    (true, None) => return Err(format!(
+                    (true, None) => {
+                        return Err(format!(
                         "unknown placeholder `{{{name}}}` (user, hostname, session, time:FORMAT)"
-                    )),
+                    ))
+                    }
                     (false, _) => {
                         return Err(format!("unclosed `{{{name}` (a literal brace is `{{{{`)"))
                     }
