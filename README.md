@@ -100,8 +100,9 @@ anchor = "center"
 or array, extra CSS classes), `halign`/`valign` (`start`/`center`/`end`/
 `fill`), `anchor` (sugar for both: `center`, `top`, `bottom-right`, ...),
 `hexpand`/`vexpand`, `margin` (int or `[top, right, bottom, left]`),
-`width`/`height` (pixels, or a share of the window such as `"26%"` — a card
-that keeps its width whatever the message says), `visible`.
+`width`/`height` (pixels, or a share of the window such as `"26%"`; sizing
+from the stylesheet with the `--hg-vw` variables is the way meant for
+themes — see style.css below), `visible`.
 
 **Widgets:**
 
@@ -151,12 +152,17 @@ the window's width and height, in px), `--hg-vmin`, `--hg-vmax`. Anything
 can be sized or spaced from them with `calc()`:
 
 ```css
-#card     { min-width: calc(var(--hg-vw) * 25); }   /* a quarter of the screen */
+#card     { min-width: calc(var(--hg-vw) * 25 - 58px); }   /* a quarter of the screen */
 .hg-clock { margin-top: calc(var(--hg-vh) * 8); font-size: calc(var(--hg-vmin) * 4); }
 ```
 
-(`width`/`height` in layout.toml take `"25%"` too, for layouts that would
-rather not touch CSS.)
+`min-width`/`min-height` are the content box: the card above subtracts its
+own padding (2 × 28 px) and border (2 × 1 px) to come out at exactly a
+quarter. Older greeters do not publish the variables; `var(--hg-vw, 18px)`
+keeps such a rule fixed at 18 px per unit instead of dropping it. The frame
+right after a resize is laid out with the previous values. (`width`/`height`
+in layout.toml take `"25%"` too, border-box, for layouts that would rather
+not touch CSS.)
 
 ## Writing a widget (addons)
 

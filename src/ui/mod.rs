@@ -57,7 +57,10 @@ pub fn load_css(path: &Path) -> Vec<String> {
 /// properties instead — `--hg-vw`/`--hg-vh` (1 % of its width/height),
 /// `--hg-vmin`/`--hg-vmax` — kept current as it changes:
 /// `#card { min-width: calc(var(--hg-vw) * 25); }`. Below USER priority, so
-/// a stylesheet may even set its own.
+/// a stylesheet may even set its own (vmin/vmax follow, they are derived
+/// in CSS). Never larger than the monitor: a windowed demo whose content
+/// asks for more than the window would otherwise grow without end. The
+/// frame right after a resize is laid out with the previous values.
 pub fn publish_viewport(window: &gtk::ApplicationWindow) {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&viewport_css(0, 0));
@@ -70,7 +73,12 @@ pub fn publish_viewport(window: &gtk::ApplicationWindow) {
         let Some(surface) = window.surface() else { return };
         let provider = provider.clone();
         let update = move |surface: &gtk::gdk::Surface| {
-            provider.load_from_string(&viewport_css(surface.width(), surface.height()));
+            let (mut width, mut height) = (surface.width(), surface.height());
+            if let Some(monitor) = surface.display().monitor_at_surface(surface) {
+                let screen = monitor.geometry();
+                (width, height) = (width.min(screen.width()), height.min(screen.height()));
+            }
+            provider.load_from_string(&viewport_css(width, height));
         };
         update(&surface);
         surface.connect_width_notify(update.clone());
@@ -81,9 +89,8 @@ pub fn publish_viewport(window: &gtk::ApplicationWindow) {
 fn viewport_css(width: i32, height: i32) -> String {
     let (vw, vh) = (f64::from(width.max(0)) / 100.0, f64::from(height.max(0)) / 100.0);
     format!(
-        "window.hg-window {{ --hg-vw: {vw}px; --hg-vh: {vh}px; --hg-vmin: {}px; --hg-vmax: {}px; }}",
-        vw.min(vh),
-        vw.max(vh)
+        "window.hg-window {{ --hg-vw: {vw}px; --hg-vh: {vh}px; \
+         --hg-vmin: min(var(--hg-vw), var(--hg-vh)); --hg-vmax: max(var(--hg-vw), var(--hg-vh)); }}"
     )
 }
 
@@ -115,13 +122,10 @@ mod tests {
 
     #[test]
     fn viewport_units_are_a_hundredth_of_the_window() {
-        assert_eq!(
-            viewport_css(1800, 1125),
-            "window.hg-window { --hg-vw: 18px; --hg-vh: 11.25px; --hg-vmin: 11.25px; --hg-vmax: 18px; }"
-        );
-        assert_eq!(
-            viewport_css(0, -4),
-            "window.hg-window { --hg-vw: 0px; --hg-vh: 0px; --hg-vmin: 0px; --hg-vmax: 0px; }"
-        );
+        let css = viewport_css(1800, 1125);
+        assert!(css.starts_with("window.hg-window { --hg-vw: 18px; --hg-vh: 11.25px; "), "{css}");
+        assert!(css.contains("--hg-vmin: min(var(--hg-vw), var(--hg-vh));"), "{css}");
+        assert!(css.contains("--hg-vmax: max(var(--hg-vw), var(--hg-vh));"), "{css}");
+        assert!(viewport_css(0, -4).contains("--hg-vw: 0px; --hg-vh: 0px;"));
     }
 }
