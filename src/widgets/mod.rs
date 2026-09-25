@@ -11,6 +11,7 @@ mod session;
 mod username;
 
 use gtk4 as gtk;
+use gtk4::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -50,6 +51,65 @@ impl fmt::Display for WidgetError {
     }
 }
 
+/// `xalign`, `justify`, `ellipsize`, `lines`, `markup` — for any text widget.
+pub fn apply_text_props(label: &gtk::Label, node: &Node) -> Result<(), WidgetError> {
+    if let Some(xalign) = node.props.float("xalign")? {
+        label.set_xalign(unit("xalign", xalign)?);
+    }
+    if let Some(justify) = node.props.str("justify")? {
+        label.set_justify(match justify.as_str() {
+            "left" => gtk::Justification::Left,
+            "center" => gtk::Justification::Center,
+            "right" => gtk::Justification::Right,
+            "fill" => gtk::Justification::Fill,
+            _ => return Err(WidgetError::Other("`justify` must be left/center/right/fill".into())),
+        });
+    }
+    if let Some(mode) = node.props.str("ellipsize")? {
+        label.set_ellipsize(match mode.as_str() {
+            "none" => gtk::pango::EllipsizeMode::None,
+            "start" => gtk::pango::EllipsizeMode::Start,
+            "middle" => gtk::pango::EllipsizeMode::Middle,
+            "end" => gtk::pango::EllipsizeMode::End,
+            _ => {
+                return Err(WidgetError::Other("`ellipsize` must be none/start/middle/end".into()))
+            }
+        });
+    }
+    if let Some(lines) = node.props.int("lines")? {
+        label.set_lines(lines as i32);
+    }
+    if let Some(markup) = node.props.bool("markup")? {
+        label.set_use_markup(markup);
+    }
+    Ok(())
+}
+
+pub fn apply_entry_props(
+    editable: &impl IsA<gtk::Editable>,
+    node: &Node,
+) -> Result<(), WidgetError> {
+    if let Some(xalign) = node.props.float("xalign")? {
+        editable.set_alignment(unit("xalign", xalign)?);
+    }
+    Ok(())
+}
+
+fn unit(key: &str, value: f64) -> Result<f32, WidgetError> {
+    if (0.0..=1.0).contains(&value) {
+        Ok(value as f32)
+    } else {
+        Err(WidgetError::Other(format!("`{key}` must be between 0.0 and 1.0")))
+    }
+}
+
+/// The plain password prompt (`^password:?\s*$`, any case) — as opposed to
+/// a "New password:" a layout may want to show.
+pub fn is_default_prompt(text: &str) -> bool {
+    let text = text.trim_end();
+    text.strip_suffix(':').unwrap_or(text).eq_ignore_ascii_case("password")
+}
+
 pub struct Registry(HashMap<&'static str, Box<dyn WidgetDef>>);
 
 impl Registry {
@@ -86,5 +146,27 @@ impl Registry {
         let mut kinds: Vec<_> = self.0.keys().copied().collect();
         kinds.sort_unstable();
         kinds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_plain_password_prompt_is_default() {
+        for text in ["Password:", "password", "PASSWORD: ", "Password:\n", "password:"] {
+            assert!(is_default_prompt(text), "{text:?}");
+        }
+        for text in ["New password:", "Password again:", " Password:", "Passwords:", "", "Token:"] {
+            assert!(!is_default_prompt(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn alignments_are_a_share() {
+        assert_eq!(unit("xalign", 0.25).unwrap(), 0.25);
+        assert!(unit("xalign", 1.5).unwrap_err().to_string().contains("xalign"));
+        assert!(unit("xalign", -0.1).is_err());
     }
 }

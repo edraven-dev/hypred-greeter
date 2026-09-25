@@ -20,6 +20,10 @@ pub enum UiEvent {
     AuthError(String),
     Busy(bool),
     SessionChanged(usize),
+    /// A passive (eager) conversation is open and nothing was submitted.
+    Armed(bool),
+    /// The session is being started (after auth success).
+    Starting,
     Focus(FocusTarget),
     /// The username entry's text; also emitted once at startup.
     UsernameChanged(String),

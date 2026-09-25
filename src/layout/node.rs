@@ -51,6 +51,9 @@ pub struct Common {
     pub width: Option<Size>,
     pub height: Option<Size>,
     pub visible: Option<bool>,
+    /// Grab focus once mapped.
+    pub focus: Option<bool>,
+    pub focusable: Option<bool>,
 }
 
 pub struct Props {
@@ -99,10 +102,11 @@ impl Props {
         }
     }
 
+    /// `xalign = 1` is as valid as `xalign = 0.5`.
     pub fn float(&self, key: &str) -> Result<Option<f64>, WidgetError> {
         match self.raw(key) {
             None => Ok(None),
-            Some(toml::Value::Float(x)) => Ok(Some(*x)),
+            Some(toml::Value::Float(f)) => Ok(Some(*f)),
             Some(toml::Value::Integer(n)) => Ok(Some(*n as f64)),
             Some(other) => Err(WidgetError::bad_prop(key, "a number", other)),
         }
@@ -175,11 +179,12 @@ mod tests {
     #[test]
     fn floats_take_integers_and_lists_take_only_strings() {
         let p = props(
-            "xalign = 0.5\nwhole = 1\ncommand = [\"sh\", \"-c\", \"id\"]\nmixed = [\"a\", 1]\n",
+            "xalign = 0.5\nwhole = 1\nword = \"x\"\ncommand = [\"sh\", \"-c\", \"id\"]\nmixed = [\"a\", 1]\n",
         );
         assert_eq!(p.float("xalign").unwrap(), Some(0.5));
         assert_eq!(p.float("whole").unwrap(), Some(1.0));
         assert_eq!(p.float("missing").unwrap(), None);
+        assert!(p.float("word").is_err());
         assert_eq!(p.str_list("command").unwrap().unwrap(), ["sh", "-c", "id"]);
         assert_eq!(p.str_list("missing").unwrap(), None);
         let err = p.str_list("mixed").unwrap_err().to_string();

@@ -38,6 +38,12 @@ rearm-window = 0
 # The username shown when nothing is remembered yet (a layout without a
 # `username` widget needs one).
 # user = "edraven"
+# Text left in the password entry keeps a parked prompt ready (no re-arm)
+# for this many seconds after the last input.
+typing-hold = 30
+# How long the username entry has to settle before an eager conversation
+# opens for the name typed.
+username-debounce-ms = 400
 
 [commands]
 # Any name = argv; a `button` runs one by name (action = "suspend"). reboot

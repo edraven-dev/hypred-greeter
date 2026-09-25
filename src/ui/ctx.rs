@@ -59,12 +59,18 @@ pub struct AppHandle {
     pub auth: Rc<Auth>,
     pub bus: Rc<Bus>,
     pub shared: Rc<Shared>,
+    username_debounce: Duration,
     edit_debounce: Rc<Cell<Option<glib::SourceId>>>,
 }
 
 impl AppHandle {
-    pub fn new(auth: Rc<Auth>, bus: Rc<Bus>, shared: Rc<Shared>) -> Self {
-        Self { auth, bus, shared, edit_debounce: Rc::default() }
+    pub fn new(
+        auth: Rc<Auth>,
+        bus: Rc<Bus>,
+        shared: Rc<Shared>,
+        username_debounce: Duration,
+    ) -> Self {
+        Self { auth, bus, shared, username_debounce, edit_debounce: Rc::default() }
     }
 
     pub fn username(&self) -> String {
@@ -114,7 +120,7 @@ impl AppHandle {
         }
         let (auth, shared, slot) =
             (self.auth.clone(), self.shared.clone(), self.edit_debounce.clone());
-        let source = glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let source = glib::timeout_add_local_once(self.username_debounce, move || {
             // Cleared here so a fired source is never removed twice.
             slot.set(None);
             let username = shared.username.borrow().clone();
@@ -243,7 +249,7 @@ mod tests {
                     seat_active: Box::new(|| true),
                 },
             );
-            scenario(&AppHandle::new(auth, bus, shared));
+            scenario(&AppHandle::new(auth, bus, shared, Duration::from_millis(400)));
         });
         acquired.expect("test context must be acquirable");
         std::mem::forget(context);

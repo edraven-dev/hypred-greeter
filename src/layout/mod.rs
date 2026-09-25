@@ -164,7 +164,13 @@ fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>)
             None => bad("valign", "start/center/end/fill"),
         }
     }
-    for (key, slot) in [("hexpand", &mut common.hexpand), ("vexpand", &mut common.vexpand)] {
+    for (key, slot) in [
+        ("hexpand", &mut common.hexpand),
+        ("vexpand", &mut common.vexpand),
+        ("visible", &mut common.visible),
+        ("focus", &mut common.focus),
+        ("focusable", &mut common.focusable),
+    ] {
         if let Some(value) = table.remove(key) {
             match value.as_bool() {
                 Some(b) => *slot = Some(b),
@@ -197,12 +203,6 @@ fn parse_common(table: &mut toml::Table, path: &str, problems: &mut Vec<String>)
             }
         }
     }
-    if let Some(value) = table.remove("visible") {
-        match value.as_bool() {
-            Some(b) => common.visible = Some(b),
-            None => bad("visible", "a boolean"),
-        }
-    }
     common
 }
 
@@ -219,7 +219,16 @@ fn login_possible(root: &Node, require_auth: bool, known_user: bool) -> Result<(
 }
 
 pub fn contains_kind(node: &Node, kind: &str) -> bool {
-    node.kind == kind || node.children.iter().any(|child| contains_kind(child, kind))
+    any(node, &|node| node.kind == kind)
+}
+
+/// Some widget asked for the initial focus with `focus = true`.
+pub fn requests_focus(node: &Node) -> bool {
+    any(node, &|node| node.common.focus == Some(true))
+}
+
+fn any(node: &Node, pred: &dyn Fn(&Node) -> bool) -> bool {
+    pred(node) || node.children.iter().any(|child| any(child, pred))
 }
 
 #[cfg(test)]
@@ -287,6 +296,25 @@ mod tests {
         let mut problems = Vec::new();
         assert!(parse_str("not = [valid", &mut problems).is_none());
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn focus_and_focusable_are_common_props() {
+        let mut problems = Vec::new();
+        let text =
+            "[root]\nwidget = \"box\"\n[[root.children]]\nwidget = \"label\"\nfocusable = false\n\
+                    [[root.children]]\nwidget = \"password\"\nfocus = true\n";
+        let root = parse_str(text, &mut problems).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(root.children[0].common.focusable, Some(false));
+        assert_eq!(root.children[0].common.focus, None);
+        assert_eq!(root.children[1].common.focus, Some(true));
+        assert!(requests_focus(&root));
+
+        let text = "[root]\nwidget = \"box\"\nfocus = \"yes\"\n";
+        let root = parse_str(text, &mut problems).unwrap();
+        assert_eq!(problems, ["root: `focus` must be a boolean"]);
+        assert!(!requests_focus(&root));
     }
 
     #[test]

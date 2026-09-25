@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::layout::Node;
 use crate::ui::bus::UiEvent;
 use crate::ui::ctx::{AppHandle, BuildCtx};
-use crate::widgets::{clock, WidgetDef, WidgetError};
+use crate::widgets::{apply_text_props, clock, WidgetDef, WidgetError};
 
 pub struct LabelDef;
 
@@ -197,31 +197,6 @@ fn hostname() -> String {
         .unwrap_or_else(|| "localhost".into())
 }
 
-// Stand-in for the shared text-prop helper (xalign, justify, markup) —
-// to be replaced by widgets::apply_text_props once that lands.
-fn apply_text_props(label: &gtk::Label, node: &Node) -> Result<(), WidgetError> {
-    if let Some(xalign) = node.props.float("xalign")? {
-        label.set_xalign(xalign.clamp(0.0, 1.0) as f32);
-    }
-    if let Some(justify) = node.props.str("justify")? {
-        label.set_justify(match justify.as_str() {
-            "left" => gtk::Justification::Left,
-            "center" => gtk::Justification::Center,
-            "right" => gtk::Justification::Right,
-            "fill" => gtk::Justification::Fill,
-            _ => {
-                return Err(WidgetError::Other(
-                    "`justify` must be left, center, right or fill".into(),
-                ))
-            }
-        });
-    }
-    if let Some(markup) = node.props.bool("markup")? {
-        label.set_use_markup(markup);
-    }
-    Ok(())
-}
-
 impl WidgetDef for LabelDef {
     fn kind(&self) -> &'static str {
         "label"
@@ -276,6 +251,8 @@ impl WidgetDef for LabelDef {
             | UiEvent::PamError(_)
             | UiEvent::AuthError(_)
             | UiEvent::Busy(_)
+            | UiEvent::Armed(_)
+            | UiEvent::Starting
             | UiEvent::Focus(_) => {}
         });
         if let Some(argv) = command {

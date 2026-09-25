@@ -25,13 +25,15 @@ window.hg-window {
 }
 
 /* the default layout's login card (`name = "card"`): a share of the screen, not of
-   the text — messages of any length wrap inside it (--hg-vw is 1 % of the window) */
+   the text — messages of any length wrap inside it (--hg-vw is 1 % of the window);
+   the gap between its rows is border-spacing (a box's `spacing` in TOML adds to it) */
 #card {
   background-color: alpha(#000000, 0.35);
   border: 1px solid alpha(@muted, 0.35);
   border-radius: 16px;
   padding: 28px 32px;
   min-width: calc(var(--hg-vw) * 23);
+  border-spacing: 12px;
 }
 
 /* a widget that failed to build renders as an inline ⚠ placeholder */
@@ -43,6 +45,7 @@ window.hg-window {
 .hg-clock {
   font-size: 42px;
   font-weight: 300;
+  margin-top: 48px;
 }
 
 entry.hg-username,
@@ -70,6 +73,10 @@ dropdown.hg-session > button {
 }
 
 /* they float over whatever the background is — give them a body of their own */
+.hg-power {
+  margin: 0 24px 24px 0;
+  border-spacing: 8px;
+}
 .hg-power button {
   background-image: none;
   box-shadow: none;

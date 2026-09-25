@@ -72,13 +72,31 @@ pub struct Gtk {
     pub font: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Auth {
     pub eager: bool,
     pub rearm_window: Rearm,
     /// The username shown when nothing is remembered.
     pub user: Option<String>,
+    /// Seconds text left in the password entry keeps a parked prompt ready
+    /// after the last input — a stray key must not switch the reader off.
+    pub typing_hold: u64,
+    /// How long the username entry has to settle before an eager
+    /// conversation opens for the name typed.
+    pub username_debounce_ms: u64,
+}
+
+impl Default for Auth {
+    fn default() -> Self {
+        Self {
+            eager: false,
+            rearm_window: Rearm::Never,
+            user: None,
+            typing_hold: 30,
+            username_debounce_ms: 400,
+        }
+    }
 }
 
 /// `rearm-window`: seconds after the last input (0 = never), or "always".
@@ -502,6 +520,17 @@ mod tests {
         let config = parse("[auth]\neager = true\nrearm-window = 120\n").unwrap().0;
         assert!(config.auth.eager);
         assert_eq!(config.auth.rearm_window, Rearm::Window(120));
+    }
+
+    #[test]
+    fn auth_timings_default_and_parse() {
+        let config = parse("").unwrap().0;
+        assert_eq!(config.auth.typing_hold, 30);
+        assert_eq!(config.auth.username_debounce_ms, 400);
+        let config = parse("[auth]\ntyping-hold = 5\nusername-debounce-ms = 0\n").unwrap().0;
+        assert_eq!(config.auth.typing_hold, 5);
+        assert_eq!(config.auth.username_debounce_ms, 0);
+        assert!(parse("[auth]\ntyping-hold = -1\n").is_err());
     }
 
     #[test]
