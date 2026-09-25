@@ -12,6 +12,11 @@ pub struct ImageDef;
 
 /// GTK's own icon size, what a button's icon gets.
 const ICON_SIZE: i32 = 16;
+/// An avatar is chosen by whoever types a username: a FIFO would block the
+/// main thread in open(2) for good, a huge file or a decompression bomb is
+/// decoded in full before it shows.
+const AVATAR_MAX_BYTES: u64 = 1024 * 1024;
+const AVATAR_MAX_SIDE: i32 = 4096;
 
 /// A theme icon by name, or an image file by absolute path.
 pub fn load_icon(value: &str) -> Result<gtk::Image, WidgetError> {
@@ -63,10 +68,22 @@ fn home_in(passwd: &str, user: &str) -> Option<PathBuf> {
     })
 }
 
+/// A regular file of bounded size whose header says a bounded picture
+/// (metadata follows symlinks, so a link to a FIFO is refused too).
+fn readable_picture(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    if !meta.is_file() || meta.len() > AVATAR_MAX_BYTES {
+        return false;
+    }
+    gtk::gdk_pixbuf::Pixbuf::file_info(path)
+        .is_some_and(|(_, width, height)| width <= AVATAR_MAX_SIDE && height <= AVATAR_MAX_SIDE)
+}
+
 fn show_avatar(image: &gtk::Image, user: &str, size: Option<i32>) {
     let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
     let found = avatar_paths(user, &passwd)
         .into_iter()
+        .filter(|path| readable_picture(path))
         .find_map(|path| gdk::Texture::from_filename(path).ok());
     match found {
         Some(texture) => image.set_paintable(Some(&texture)),
@@ -143,6 +160,38 @@ mod tests {
             avatar_paths("ghost", PASSWD),
             [PathBuf::from("/var/lib/AccountsService/icons/ghost")]
         );
+    }
+
+    const PNG_1X1: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60,
+        0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0xf6, 0x17, 0x38, 0x55, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn only_a_bounded_regular_picture_is_readable() {
+        let dir = std::env::temp_dir().join(format!("hg-avatar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!readable_picture(&dir));
+        assert!(!readable_picture(&dir.join("missing.png")));
+        let big = dir.join("big.png");
+        std::fs::write(&big, vec![0u8; AVATAR_MAX_BYTES as usize + 1]).unwrap();
+        assert!(!readable_picture(&big));
+        let fifo = dir.join("face");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        assert!(!readable_picture(&fifo));
+        let link = dir.join("link.png");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        assert!(!readable_picture(&link));
+        let junk = dir.join("junk.png");
+        std::fs::write(&junk, b"not a picture").unwrap();
+        assert!(!readable_picture(&junk));
+        let png = dir.join("one.png");
+        std::fs::write(&png, PNG_1X1).unwrap();
+        assert!(readable_picture(&png));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

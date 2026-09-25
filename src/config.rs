@@ -243,6 +243,9 @@ pub struct Rewrite {
     pub text: String,
     #[serde(default)]
     pub kind: Option<TextKind>,
+    /// Compiled once, on first use.
+    #[serde(skip)]
+    compiled: std::cell::OnceCell<Result<glib::Regex, String>>,
 }
 
 /// `error`: a PAM message mid-conversation; `failure`: a conversation
@@ -266,7 +269,7 @@ impl Texts {
         let rule = self
             .rewrite
             .iter()
-            .filter(|rule| rule.kind.is_none_or(|limit| limit == kind))
+            .filter(|rule| !rule.pattern.is_empty() && rule.kind.is_none_or(|limit| limit == kind))
             .find_map(|rule| rule.apply(text));
         match rule {
             Some(rewritten) => (!rewritten.is_empty()).then_some(rewritten),
@@ -279,7 +282,12 @@ impl Texts {
             .iter()
             .enumerate()
             .filter_map(|(i, rule)| {
-                let err = rule.compile()?.err()?;
+                if rule.pattern.is_empty() {
+                    return Some(format!(
+                        "texts.rewrite[{i}]: `match` is empty, the rule is skipped"
+                    ));
+                }
+                let err = rule.compiled()?.err()?;
                 Some(format!("texts.rewrite[{i}]: `{}` is not a valid regex: {err}", rule.pattern))
             })
             .collect()
@@ -287,19 +295,25 @@ impl Texts {
 }
 
 impl Rewrite {
-    fn compile(&self) -> Option<Result<glib::Regex, glib::Error>> {
+    /// A `regex = true` rule's pattern; `None` for a substring rule.
+    fn compiled(&self) -> Option<Result<&glib::Regex, &str>> {
         if !self.regex {
             return None;
         }
-        let flags = (glib::RegexCompileFlags::DEFAULT, glib::RegexMatchFlags::DEFAULT);
-        // g_regex_new returns a regex or an error, never neither.
-        Some(glib::Regex::new(&self.pattern, flags.0, flags.1).map(Option::unwrap))
+        let compiled = self.compiled.get_or_init(|| {
+            let flags = (glib::RegexCompileFlags::DEFAULT, glib::RegexMatchFlags::DEFAULT);
+            // g_regex_new returns a regex or an error, never neither.
+            glib::Regex::new(&self.pattern, flags.0, flags.1)
+                .map(Option::unwrap)
+                .map_err(|err| err.to_string())
+        });
+        Some(compiled.as_ref().map_err(String::as_str))
     }
 
     /// `Some` when the rule matches; a regex rule expands `\1` references
     /// in `text`.
     fn apply(&self, text: &str) -> Option<String> {
-        let Some(regex) = self.compile() else {
+        let Some(regex) = self.compiled() else {
             return text.contains(&self.pattern).then(|| self.text.clone());
         };
         let text = glib::GString::from(text);
@@ -489,6 +503,19 @@ mod tests {
         );
         assert_eq!(texts.rewrite(TextKind::Info, "(").as_deref(), Some("("));
         assert!(rules("[[texts.rewrite]]\nmatch = \"(\"\ntext = \"x\"\n").problems().is_empty());
+    }
+
+    #[test]
+    fn an_empty_match_is_a_problem_and_skipped() {
+        let texts = rules(
+            "[[texts.rewrite]]\nmatch = \"\"\ntext = \"EVERYTHING\"\n\
+             [[texts.rewrite]]\nmatch = \"\"\nregex = true\ntext = \"x\"\n",
+        );
+        let problems = texts.problems();
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().all(|p| p.contains("`match` is empty")), "{problems:?}");
+        let place = "Place your finger";
+        assert_eq!(texts.rewrite(TextKind::Info, place).as_deref(), Some(place));
     }
 
     #[test]

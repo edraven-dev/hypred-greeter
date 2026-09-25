@@ -84,15 +84,21 @@ fn main() {
             }
         };
 
+        let discovered = sessions::discover();
         let session_list =
-            sessions::apply(sessions::discover(), &loaded.config.sessions, &mut problems);
-        if session_list.is_empty() {
+            sessions::apply(discovered.clone(), &loaded.config.sessions, &mut problems);
+        if discovered.is_empty() {
             problems.push("no sessions found in wayland-sessions/xsessions".into());
         }
         let default_session = loaded.config.sessions.default.as_deref();
         if let Some(id) = default_session {
             if !session_list.iter().any(|s| s.matches_cache_id(id)) {
-                problems.push(format!("sessions.default `{id}` matches no installed session"));
+                let why = if discovered.iter().any(|s| s.matches_cache_id(id)) {
+                    "is excluded by [sessions] only/hide"
+                } else {
+                    "matches no installed session"
+                };
+                problems.push(format!("sessions.default `{id}` {why}"));
             }
         }
         let shared = ui::ctx::Shared::new(initial_username, session_list, saved, default_session);

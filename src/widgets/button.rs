@@ -84,10 +84,26 @@ fn run(app: &AppHandle, demo: bool, texts: &Texts, argv: &[String]) {
         app.emit(&UiEvent::Info(format!("demo: would run {}", argv.join(" "))));
         return;
     }
-    if let Err(err) = std::process::Command::new(program).args(args).spawn() {
-        let text =
-            texts.power_failed.replace("{program}", program).replace("{error}", &err.to_string());
-        app.emit(&UiEvent::AuthError(text));
+    let spawned = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .env_remove("GREETD_SOCK")
+        .spawn();
+    match spawned {
+        // Reaped off the main thread: a dropped Child stays a zombie.
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        // A PamError: an AuthError would wipe a half-typed password.
+        Err(err) => {
+            let text = texts
+                .power_failed
+                .replace("{program}", program)
+                .replace("{error}", &err.to_string());
+            app.emit(&UiEvent::PamError(text));
+        }
     }
 }
 
@@ -111,7 +127,7 @@ impl WidgetDef for ButtonDef {
                 button.add_css_class("image-button");
             }
             (None, Some(text)) => button.set_label(&text),
-            (None, None) => {}
+            (None, None) => return Err(WidgetError::Other("`label` or `icon` is required".into())),
         }
         if let Some(tooltip) = node.props.str("tooltip")? {
             button.set_tooltip_text(Some(&tooltip));
@@ -183,16 +199,16 @@ mod tests {
     fn exactly_one_of_action_or_command_and_it_must_exist() {
         let mut commands = Commands::default();
         commands.0.insert("empty".into(), Vec::new());
-        for bad in [
-            "",
-            "action = \"nope\"",
-            "action = \"empty\"",
-            "action = \"cancel\"\ncommand = [\"x\"]",
-            "command = []",
-            "command = \"systemctl suspend\"",
+        for (bad, fragment) in [
+            ("", "one of `action` or `command` is required"),
+            ("action = \"nope\"", "unknown action `nope`"),
+            ("action = \"empty\"", "command `empty` is empty"),
+            ("action = \"cancel\"\ncommand = [\"x\"]", "exclude each other"),
+            ("command = []", "must not be empty"),
+            ("command = \"systemctl suspend\"", "an array of strings"),
         ] {
             let err = Action::parse(&node(bad), &commands).unwrap_err().to_string();
-            assert!(!err.is_empty(), "{bad}");
+            assert!(err.contains(fragment), "{bad}: {err}");
         }
         let err = Action::parse(&node("action = \"nope\""), &commands).unwrap_err().to_string();
         assert!(err.contains("unknown action `nope`") && err.contains("next-session"), "{err}");

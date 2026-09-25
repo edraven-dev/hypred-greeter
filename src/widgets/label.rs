@@ -33,6 +33,15 @@ struct Template(Vec<Piece>);
 
 impl Template {
     fn parse(text: &str) -> Result<Self, String> {
+        Self::parse_with(text, false)
+    }
+
+    /// Command output: an unknown or unclosed placeholder is plain text.
+    fn parse_lenient(text: &str) -> Self {
+        Self::parse_with(text, true).expect("lenient parsing has no error")
+    }
+
+    fn parse_with(text: &str, lenient: bool) -> Result<Self, String> {
         let mut pieces = Vec::new();
         let mut literal = String::new();
         let mut chars = text.chars().peekable();
@@ -42,27 +51,29 @@ impl Template {
                 literal.push(c);
             } else if c == '{' {
                 let mut name = String::new();
-                loop {
+                let closed = loop {
                     match chars.next() {
-                        Some('}') => break,
+                        Some('}') => break true,
                         Some(c) => name.push(c),
-                        None => {
-                            return Err(format!("unclosed `{{{name}` (a literal brace is `{{{{`)"))
-                        }
+                        None => break false,
                     }
-                }
-                let hole = match name.as_str() {
-                    "user" => Placeholder::User,
-                    "hostname" => Placeholder::Hostname,
-                    "session" => Placeholder::Session,
-                    _ => match name.strip_prefix("time:") {
-                        Some(format) => Placeholder::Time(format.to_string()),
-                        None => {
-                            return Err(format!(
-                                "unknown placeholder `{{{name}}}` (user, hostname, session, time:FORMAT)"
-                            ))
-                        }
-                    },
+                };
+                let hole = match (closed, Self::hole(&name)) {
+                    (true, Some(hole)) => hole,
+                    (true, None) if lenient => {
+                        literal.push_str(&format!("{{{name}}}"));
+                        continue;
+                    }
+                    (false, _) if lenient => {
+                        literal.push_str(&format!("{{{name}"));
+                        continue;
+                    }
+                    (true, None) => return Err(format!(
+                        "unknown placeholder `{{{name}}}` (user, hostname, session, time:FORMAT)"
+                    )),
+                    (false, _) => {
+                        return Err(format!("unclosed `{{{name}` (a literal brace is `{{{{`)"))
+                    }
                 };
                 if !literal.is_empty() {
                     pieces.push(Piece::Text(std::mem::take(&mut literal)));
@@ -78,6 +89,15 @@ impl Template {
         Ok(Self(pieces))
     }
 
+    fn hole(name: &str) -> Option<Placeholder> {
+        Some(match name {
+            "user" => Placeholder::User,
+            "hostname" => Placeholder::Hostname,
+            "session" => Placeholder::Session,
+            _ => Placeholder::Time(name.strip_prefix("time:")?.to_string()),
+        })
+    }
+
     fn time_formats(&self) -> impl Iterator<Item = &str> {
         self.0.iter().filter_map(|piece| match piece {
             Piece::Hole(Placeholder::Time(format)) => Some(format.as_str()),
@@ -85,11 +105,15 @@ impl Template {
         })
     }
 
-    /// `escape`: the values land in Pango markup.
-    fn render(&self, value: impl Fn(&Placeholder) -> String, escape: bool) -> String {
+    /// `escape`: the values land in Pango markup — and the text too when it
+    /// is `data`, a command's output rather than the layout's markup.
+    fn render(&self, value: impl Fn(&Placeholder) -> String, escape: bool, data: bool) -> String {
         let mut out = String::new();
         for piece in &self.0 {
             match piece {
+                Piece::Text(text) if escape && data => {
+                    out.push_str(&glib::markup_escape_text(text));
+                }
                 Piece::Text(text) => out.push_str(text),
                 Piece::Hole(hole) => {
                     let value = value(hole);
@@ -111,6 +135,8 @@ struct Live {
     hostname: String,
     app: AppHandle,
     markup: bool,
+    /// The template is a command's output.
+    data: Cell<bool>,
     ticking: Cell<bool>,
 }
 
@@ -127,6 +153,7 @@ impl Live {
                 }
             },
             self.markup,
+            self.data.get(),
         );
         label.set_label(&text);
     }
@@ -134,14 +161,10 @@ impl Live {
     /// A command's output replaces the template; placeholders apply to
     /// it too.
     fn set_source(self: &Rc<Self>, text: &str) {
-        match Template::parse(text) {
-            Ok(template) => {
-                *self.template.borrow_mut() = template;
-                self.render();
-                self.tick();
-            }
-            Err(why) => warn_!("label command output: {why}"),
-        }
+        *self.template.borrow_mut() = Template::parse_lenient(text);
+        self.data.set(true);
+        self.render();
+        self.tick();
     }
 
     /// One ticker per label, started once a `{time:…}` is on show.
@@ -165,25 +188,37 @@ impl Live {
 /// seconds — and hands over each successful run's trimmed stdout.
 fn run_command(argv: Vec<String>, interval: u64) -> async_channel::Receiver<String> {
     let (tx, rx) = async_channel::unbounded();
-    std::thread::spawn(move || loop {
-        let output = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .stdin(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if tx.send_blocking(text).is_err() {
-                    return;
+    std::thread::spawn(move || {
+        // One line per distinct failure, not one per interval.
+        let mut last_failure: Option<String> = None;
+        loop {
+            let output = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(std::process::Stdio::null())
+                .env_remove("GREETD_SOCK")
+                .output();
+            let failure = match output {
+                Ok(out) if out.status.success() => {
+                    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if tx.send_blocking(text).is_err() {
+                        return;
+                    }
+                    None
                 }
+                Ok(out) => Some(out.status.to_string()),
+                Err(err) => Some(err.to_string()),
+            };
+            if failure != last_failure {
+                if let Some(why) = &failure {
+                    warn_!("label command `{}`: {why}", argv.join(" "));
+                }
+                last_failure = failure;
             }
-            Ok(out) => warn_!("label command `{}`: {}", argv.join(" "), out.status),
-            Err(err) => warn_!("label command `{}`: {err}", argv.join(" ")),
+            if interval == 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(interval));
         }
-        if interval == 0 {
-            return;
-        }
-        std::thread::sleep(Duration::from_secs(interval));
     });
     rx
 }
@@ -232,6 +267,11 @@ impl WidgetDef for LabelDef {
             label.set_max_width_chars(chars as i32);
         }
         apply_text_props(&label, node)?;
+        if label.uses_markup() {
+            if let Err(err) = gtk::pango::parse_markup(&text, '\0') {
+                return Err(WidgetError::Other(format!("`text` is not valid Pango markup: {err}")));
+            }
+        }
 
         let live = Rc::new(Live {
             label: label.downgrade(),
@@ -239,6 +279,7 @@ impl WidgetDef for LabelDef {
             hostname: hostname(),
             app: ctx.app.clone(),
             markup: label.uses_markup(),
+            data: Cell::new(false),
             ticking: Cell::new(false),
         });
         live.render();
@@ -284,17 +325,17 @@ mod tests {
     fn placeholders_render_and_braces_escape() {
         let template = Template::parse("Welcome back, {user} on {hostname} {{{session}}}").unwrap();
         let expected = "Welcome back, alice on jarilo {Hyprland <uwsm>}";
-        assert_eq!(template.render(fixed, false), expected);
+        assert_eq!(template.render(fixed, false, false), expected);
         let expected = "Welcome back, alice on jarilo {Hyprland &lt;uwsm&gt;}";
-        assert_eq!(template.render(fixed, true), expected);
-        assert_eq!(Template::parse("plain").unwrap().render(fixed, true), "plain");
+        assert_eq!(template.render(fixed, true, false), expected);
+        assert_eq!(Template::parse("plain").unwrap().render(fixed, true, false), "plain");
         assert_eq!(Template::parse("").unwrap(), Template(vec![]));
     }
 
     #[test]
     fn time_takes_a_format_and_is_what_ticks() {
         let template = Template::parse("{time:%H:%M} on {time:%A}").unwrap();
-        assert_eq!(template.render(fixed, false), "time(%H:%M) on time(%A)");
+        assert_eq!(template.render(fixed, false, false), "time(%H:%M) on time(%A)");
         assert_eq!(template.time_formats().collect::<Vec<_>>(), ["%H:%M", "%A"]);
         assert!(Template::parse("{user}").unwrap().time_formats().next().is_none());
     }
@@ -306,6 +347,15 @@ mod tests {
         let err = Template::parse("hello {user").unwrap_err();
         assert!(err.contains("unclosed `{user`"), "{err}");
         assert!(Template::parse("{time}").is_err());
+    }
+
+    #[test]
+    fn command_output_is_lenient_and_escaped_under_markup() {
+        let template = Template::parse_lenient("{json: 1} {user} <b> {unclosed");
+        assert_eq!(template.render(fixed, false, true), "{json: 1} alice <b> {unclosed");
+        assert_eq!(template.render(fixed, true, true), "{json: 1} alice &lt;b&gt; {unclosed");
+        assert_eq!(Template::parse_lenient("<i>x</i>").render(fixed, true, false), "<i>x</i>");
+        assert!(Template::parse("{json: 1}").is_err());
     }
 
     #[test]

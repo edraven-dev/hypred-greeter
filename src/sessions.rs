@@ -105,10 +105,14 @@ pub fn apply(
         }
     }
 
+    let installed = sessions.len();
     if !cfg.only.is_empty() {
         sessions.retain(|s| cfg.only.iter().any(|id| s.matches_cache_id(id)));
     }
     sessions.retain(|s| !cfg.hide.iter().any(|id| s.matches_cache_id(id)));
+    if installed > 0 && sessions.is_empty() {
+        problems.push("sessions: `only`/`hide` leave no session".into());
+    }
     for session in &mut sessions {
         match cfg.names.iter().find(|(id, _)| session.matches_cache_id(id)) {
             Some((_, name)) => session.name = name.clone(),
@@ -349,6 +353,18 @@ mod tests {
             "sessions.names: `wayland/nope` matches no installed session",
             "sessions.only: `wayland/gnome` matches no installed session",
             "sessions.order: `wayland/typo` matches no installed session",
+        ];
+        assert_eq!(problems, expected);
+    }
+
+    #[test]
+    fn a_filter_that_leaves_nothing_is_reported() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions { only: vec!["wayland/nope".into()], ..Default::default() };
+        assert!(apply(installed(), &cfg, &mut problems).is_empty());
+        let expected = [
+            "sessions.only: `wayland/nope` matches no installed session",
+            "sessions: `only`/`hide` leave no session",
         ];
         assert_eq!(problems, expected);
     }

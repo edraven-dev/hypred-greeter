@@ -16,9 +16,7 @@ impl WidgetDef for SessionDef {
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
         let shared = &ctx.app.shared;
         if shared.sessions.is_empty() {
-            return Err(WidgetError::Other(
-                "no sessions found in wayland-sessions/xsessions".into(),
-            ));
+            return Err(WidgetError::Other("no session to pick from (see the banner)".into()));
         }
         let names: Vec<String> = shared.sessions.iter().map(|s| s.name.clone()).collect();
         let selected = shared.selected_session.get();
