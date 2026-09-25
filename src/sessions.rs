@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::config;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Wayland,
     X11,
@@ -57,6 +58,9 @@ pub fn discover() -> Vec<Session> {
 
 fn discover_in(data_dirs: &str) -> Vec<Session> {
     let mut sessions: Vec<Session> = Vec::new();
+    // Every stem met, hidden ones included: a NoDisplay copy in an earlier
+    // dir masks the later ones, as XDG has it.
+    let mut seen: HashSet<(Kind, String)> = HashSet::new();
 
     for dir in data_dirs.split(':').filter(|d| !d.is_empty()) {
         for (sub, kind) in [("wayland-sessions", Kind::Wayland), ("xsessions", Kind::X11)] {
@@ -67,7 +71,7 @@ fn discover_in(data_dirs: &str) -> Vec<Session> {
                     continue;
                 }
                 let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
-                if sessions.iter().any(|s| s.stem == stem && s.kind == kind) {
+                if !seen.insert((kind, stem.clone())) {
                     continue;
                 }
                 match std::fs::read_to_string(&path) {
@@ -213,6 +217,20 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "First");
         assert_eq!(sessions[0].exec, ["one"]);
+    }
+
+    #[test]
+    fn a_hidden_copy_in_an_earlier_data_dir_masks_the_later_one() {
+        let tree = Tree::new("masking");
+        tree.write(
+            "a/wayland-sessions/hypr.desktop",
+            "[Desktop Entry]\nNoDisplay=true\nExec=one\n",
+        )
+        .write("b/wayland-sessions/hypr.desktop", "[Desktop Entry]\nName=Second\nExec=two\n")
+        .write("b/wayland-sessions/sway.desktop", "[Desktop Entry]\nName=Sway\nExec=sway\n");
+        let sessions = discover_in(&tree.dirs(&["a", "b"]));
+        let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Sway"]);
     }
 
     #[test]
