@@ -133,6 +133,14 @@ must not take the focus from the entries).
 prefer `border-spacing` and `margin` in style.css, where a theme can change
 them (the built-in layout sets none).
 
+**Upgrading from 0.2.** The built-in layout used to carry its gaps and
+offsets. A stylesheet kept from 0.2 next to the new layout.toml gets none of
+them; a layout.toml copied from 0.2 next to the new style.css gets them
+twice. Add to a custom stylesheet what the default one now has — `#card {
+border-spacing: 12px }`, `.hg-clock { margin-top: 48px }`, `.hg-power {
+margin: 0 24px 24px 0; border-spacing: 8px }` — and drop `spacing`/`margin`
+from a copied layout; the `power` widget's own `spacing` now defaults to 0.
+
 **Widgets:**
 
 | widget | properties | notes |
@@ -155,7 +163,8 @@ them (the built-in layout sets none).
 within the space the widget gets), `justify` (`left`/`center`/`right`/`fill`,
 for wrapped lines), `ellipsize` (`none`/`start`/`middle`/`end`), `lines` (with
 `ellipsize`: at most that many lines), `markup` (the text is Pango markup:
-`format = "<b>%H</b>:%M"`).
+`format = "<b>%H</b>:%M"`; a text with a bare `&` or `<` fails to parse and
+is skipped, so leave it off `message`, which shows PAM's texts).
 
 ### style.css — every selector you need
 
@@ -166,7 +175,7 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 |---|---|
 | `window.hg-window` | the greeter window (carries the [state classes](#state-classes)) |
 | `.hg-banner`, `#hg-banner` | the config-problem banner |
-| `.hg-root-column` | the column holding banner + root (only while there is a banner) |
+| `.hg-root-column`, `#hg-root-column` | the column holding banner + root (only while there is a banner) |
 | `.hg-error` | inline ⚠ placeholder for a widget that failed to build |
 | `.hg-box`, `.hg-overlay`, `.hg-grid`, `.hg-label` | containers / labels |
 | `.hg-background` | the wallpaper picture |
@@ -217,8 +226,8 @@ message label:
 | class | while |
 |---|---|
 | `.hg-busy` | a submitted password is on its way |
-| `.hg-failed` | after an auth error or a PAM error message, until the next prompt, info message, re-arm or submission — it goes before it can come back, so an `animation:` on it restarts on every failure |
-| `.hg-info` | a PAM info message is up ("Place your finger …") |
+| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm or submission; a failure while it is on drops it for a frame, so an `animation:` on it restarts on every failure |
+| `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
 | `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
 | `.hg-starting` | the session is being started (stays until the greeter exits) |
 | `.hg-caps-lock` | Caps Lock is on |
