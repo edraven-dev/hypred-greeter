@@ -2,10 +2,12 @@ pub mod bus;
 pub mod ctx;
 
 use gtk4 as gtk;
+use gtk4::glib;
 use gtk4::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crate::config;
 use crate::ui::bus::{Bus, UiEvent};
@@ -13,6 +15,10 @@ use crate::ui::bus::{Bus, UiEvent};
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
 /// Past this many CSS problems the banner only counts the rest.
 const CSS_PROBLEM_LINES: usize = 5;
+/// `.hg-failed` stays at least this long: the next input re-arms the reader
+/// and pam_fprintd's next "Place your finger" follows a mismatch within one
+/// round trip, both too quick for a stylesheet's animation to show.
+const FAILED_HOLD: Duration = Duration::from_millis(1500);
 
 pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
     root.set_hexpand(true);
@@ -42,6 +48,11 @@ pub fn load_css(path: &Path) -> Vec<String> {
         let file = section.file().and_then(|file| file.basename());
         let at = section.start_location();
         let problem = css_problem(file.as_deref(), at.lines(), at.line_chars(), err);
+        // A warning (a deprecation) still renders; only errors reach the banner.
+        if err.kind::<gtk::CssParserWarning>().is_some() {
+            warn_!("css {problem}");
+            return;
+        }
         error!("css {problem}");
         sink.borrow_mut().push(problem);
     });
@@ -92,15 +103,23 @@ fn capped(mut lines: Vec<String>, limit: usize) -> Vec<String> {
 /// Window state classes: any descendant can react (`.hg-failed #card {…}`).
 pub fn track_states(window: &gtk::ApplicationWindow, bus: &Bus) {
     let weak = window.downgrade();
+    let failed = Rc::new(Failed::default());
     bus.subscribe(move |event| {
         let Some(window) = weak.upgrade() else { return };
         for (class, on) in state_changes(event) {
-            toggle_class(&window, class, on);
+            match (class, on) {
+                ("hg-failed", true) => failed.set(&window),
+                ("hg-failed", false) => failed.clear(&window),
+                _ => toggle_class(&window, class, on),
+            }
         }
     });
 
     let display = WidgetExt::display(window);
-    let Some(keyboard) = display.default_seat().and_then(|seat| seat.keyboard()) else { return };
+    let Some(keyboard) = display.default_seat().and_then(|seat| seat.keyboard()) else {
+        warn_!("no keyboard on the seat: .hg-caps-lock is not tracked");
+        return;
+    };
     let weak = window.downgrade();
     let caps_lock = move |keyboard: &gtk::gdk::Device| {
         if let Some(window) = weak.upgrade() {
@@ -109,6 +128,60 @@ pub fn track_states(window: &gtk::ApplicationWindow, bus: &Bus) {
     };
     caps_lock(&keyboard);
     keyboard.connect_caps_lock_state_notify(caps_lock);
+}
+
+/// `.hg-failed` with its hold; a failure while it is still on drops it for
+/// a frame so a CSS animation restarts (see message.rs).
+#[derive(Default)]
+struct Failed {
+    since: Cell<Option<Instant>>,
+    /// Bumped by every failure: a timer or tick from before is stale.
+    ticket: Cell<u64>,
+}
+
+impl Failed {
+    fn set(self: &Rc<Self>, window: &gtk::ApplicationWindow) {
+        let repeated = window.has_css_class("hg-failed");
+        self.since.set(Some(Instant::now()));
+        let ticket = self.ticket.get() + 1;
+        self.ticket.set(ticket);
+        if !repeated {
+            window.add_css_class("hg-failed");
+            return;
+        }
+        window.remove_css_class("hg-failed");
+        let (me, ticks) = (self.clone(), Cell::new(0));
+        window.add_tick_callback(move |window, _| {
+            ticks.set(ticks.get() + 1);
+            if ticks.get() < 2 {
+                return glib::ControlFlow::Continue;
+            }
+            if me.ticket.get() == ticket {
+                window.add_css_class("hg-failed");
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn clear(self: &Rc<Self>, window: &gtk::ApplicationWindow) {
+        let Some(since) = self.since.get() else { return };
+        let left = FAILED_HOLD.saturating_sub(since.elapsed());
+        if left.is_zero() {
+            self.since.set(None);
+            window.remove_css_class("hg-failed");
+            return;
+        }
+        let (me, weak, ticket) = (self.clone(), window.downgrade(), self.ticket.get());
+        glib::timeout_add_local_once(left, move || {
+            if me.ticket.get() != ticket {
+                return;
+            }
+            me.since.set(None);
+            if let Some(window) = weak.upgrade() {
+                window.remove_css_class("hg-failed");
+            }
+        });
+    }
 }
 
 fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
@@ -125,7 +198,7 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
 fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
     match event {
         UiEvent::Busy(true) => vec![("hg-busy", true), ("hg-failed", false)],
-        UiEvent::Busy(false) => vec![("hg-busy", false)],
+        UiEvent::Busy(false) => vec![("hg-busy", false), ("hg-starting", false)],
         UiEvent::AuthError(_) | UiEvent::PamError(_) => {
             vec![("hg-failed", true), ("hg-info", false)]
         }
@@ -265,6 +338,7 @@ mod tests {
         assert_eq!(on(&UiEvent::Armed(true), "hg-armed"), Some(true));
         assert_eq!(on(&UiEvent::Armed(false), "hg-armed"), Some(false));
         assert_eq!(on(&UiEvent::Starting, "hg-starting"), Some(true));
+        assert_eq!(on(&UiEvent::Busy(false), "hg-starting"), Some(false));
         assert!(state_changes(&UiEvent::Focus(FocusTarget::Password)).is_empty());
         assert!(state_changes(&UiEvent::SessionChanged(1)).is_empty());
     }
