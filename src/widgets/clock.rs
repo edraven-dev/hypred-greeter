@@ -8,7 +8,7 @@ use crate::widgets::{WidgetDef, WidgetError};
 
 pub struct ClockDef;
 
-fn now(format: &str) -> Option<glib::GString> {
+pub fn now(format: &str) -> Option<glib::GString> {
     glib::DateTime::now_local().ok()?.format(format).ok()
 }
 

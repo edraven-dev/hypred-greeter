@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use greetd_ipc::{AuthMessageType, Request, Response};
 
 use crate::backend::{Backend, BackendError};
-use crate::config::{self, Rearm};
+use crate::config::{self, Rearm, TextKind};
 use crate::log::{error, info};
 use crate::ui::bus::{Bus, UiEvent};
 
@@ -47,8 +47,6 @@ const RETRY_LIMIT: u32 = 3;
 const TYPING_HOLD: Duration = Duration::from_secs(30);
 /// How often a greeter that is off screen looks whether it is back.
 const SEAT_POLL: Duration = Duration::from_secs(1);
-
-const USERNAME_CHANGED: &str = "username changed — enter the password again";
 
 /// Gets the authenticated user; returns the session's (cmd, env).
 pub type ResolveStart = Box<dyn Fn(&str) -> (Vec<String>, Vec<String>)>;
@@ -84,6 +82,7 @@ pub struct Auth {
     demo: bool,
     eager: bool,
     rearm: Rearm,
+    texts: config::Texts,
     phase: RefCell<Phase>,
     generation: Cell<u64>,
     last_activity: Cell<Instant>,
@@ -112,6 +111,7 @@ impl Auth {
         bus: Rc<Bus>,
         demo: bool,
         options: &config::Auth,
+        texts: &config::Texts,
         hooks: Hooks,
     ) -> Rc<Self> {
         let (to_worker, from_main) = std::sync::mpsc::channel::<(u64, Request)>();
@@ -132,6 +132,7 @@ impl Auth {
             demo,
             eager: options.eager,
             rearm: options.rearm_window,
+            texts: texts.clone(),
             phase: RefCell::new(Phase::Idle),
             generation: Cell::new(0),
             last_activity: Cell::new(Instant::now()),
@@ -162,6 +163,34 @@ impl Auth {
 
     pub fn eager(&self) -> bool {
         self.eager
+    }
+
+    /// Every text shown passes the `[[texts.rewrite]]` rules here, once:
+    /// a dropped info or error is not emitted at all, a dropped prompt or
+    /// failure goes out with an empty text (the widgets still act on it).
+    pub fn emit(&self, event: UiEvent) {
+        let event = match event {
+            UiEvent::Info(text) => match self.texts.rewrite(TextKind::Info, &text) {
+                Some(text) => UiEvent::Info(text),
+                None => return,
+            },
+            UiEvent::PamError(text) => match self.texts.rewrite(TextKind::Error, &text) {
+                Some(text) => UiEvent::PamError(text),
+                None => return,
+            },
+            UiEvent::AuthError(text) => {
+                UiEvent::AuthError(self.texts.rewrite(TextKind::Failure, &text).unwrap_or_default())
+            }
+            UiEvent::Prompt { secret, text, passive } => {
+                let text = self.texts.rewrite(TextKind::Prompt, &text).unwrap_or_default();
+                UiEvent::Prompt { secret, text, passive }
+            }
+            UiEvent::Busy(_)
+            | UiEvent::SessionChanged(_)
+            | UiEvent::Focus(_)
+            | UiEvent::UsernameChanged(_) => event,
+        };
+        self.bus.emit(&event);
     }
 
     #[cfg(test)]
@@ -210,10 +239,10 @@ impl Auth {
             return;
         }
         if username.is_empty() {
-            self.bus.emit(&UiEvent::AuthError("enter a username".into()));
+            self.emit(UiEvent::AuthError(self.texts.enter_username.clone()));
             return;
         }
-        self.bus.emit(&UiEvent::Busy(true));
+        self.emit(UiEvent::Busy(true));
         self.open(username, Some(password), false);
     }
 
@@ -241,7 +270,7 @@ impl Auth {
                 if is_password {
                     self.begin(current, password);
                 } else {
-                    self.bus.emit(&UiEvent::AuthError(USERNAME_CHANGED.into()));
+                    self.emit(UiEvent::AuthError(self.texts.username_changed.clone()));
                     self.start_eager(&current);
                 }
             }
@@ -253,7 +282,7 @@ impl Auth {
                 *stash = Some(password);
                 *passive = false;
                 drop(phase);
-                self.bus.emit(&UiEvent::Busy(true));
+                self.emit(UiEvent::Busy(true));
             }
             Phase::Starting => {}
         }
@@ -266,7 +295,7 @@ impl Auth {
                 *awaiting_input = false;
                 *passive = false;
                 drop(phase);
-                self.bus.emit(&UiEvent::Busy(true));
+                self.emit(UiEvent::Busy(true));
                 self.send(Request::PostAuthMessageResponse { response });
             }
             _ => {}
@@ -283,7 +312,7 @@ impl Auth {
                 *stash = None;
                 *passive = true;
                 drop(phase);
-                self.bus.emit(&UiEvent::Busy(false));
+                self.emit(UiEvent::Busy(false));
             }
             Phase::Conversing { passive: true, .. } | Phase::Idle | Phase::Starting => {}
             Phase::Conversing { .. } => {
@@ -462,9 +491,9 @@ impl Auth {
         *self.phase.borrow_mut() = Phase::Idle;
         self.abandon_conversation();
         if submitted {
-            self.bus.emit(&UiEvent::Busy(false));
+            self.emit(UiEvent::Busy(false));
         }
-        self.bus.emit(&UiEvent::Info(String::new()));
+        self.emit(UiEvent::Info(String::new()));
     }
 
     fn open(&self, user: String, stash: Option<String>, passive: bool) {
@@ -511,7 +540,7 @@ impl Auth {
             Response::Success => self.handle_success(),
             Response::Error { description, .. } => {
                 let text = if description.is_empty() {
-                    "authentication failed".to_string()
+                    self.texts.auth_failed.clone()
                 } else {
                     description
                 };
@@ -525,11 +554,11 @@ impl Auth {
                 if submitted {
                     // Busy(false) first, so the entry is editable again when
                     // AuthError clears and refocuses it.
-                    self.bus.emit(&UiEvent::Busy(false));
-                    self.bus.emit(&UiEvent::AuthError(text));
+                    self.emit(UiEvent::Busy(false));
+                    self.emit(UiEvent::AuthError(text));
                 } else {
                     // Failed on its own (pam_nologin): nothing typed to reset.
-                    self.bus.emit(&UiEvent::PamError(text));
+                    self.emit(UiEvent::PamError(text));
                 }
                 self.schedule_retry(true);
             }
@@ -557,11 +586,11 @@ impl Auth {
                 if let Phase::Conversing { saw_info, .. } = &mut *self.phase.borrow_mut() {
                     *saw_info = true;
                 }
-                self.bus.emit(&UiEvent::Info(text));
+                self.emit(UiEvent::Info(text));
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
             AuthMessageType::Error => {
-                self.bus.emit(&UiEvent::PamError(text));
+                self.emit(UiEvent::PamError(text));
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
         }
@@ -575,8 +604,8 @@ impl Auth {
             }
             _ => false,
         };
-        self.bus.emit(&UiEvent::Busy(false));
-        self.bus.emit(&UiEvent::Prompt { secret, text, passive });
+        self.emit(UiEvent::Busy(false));
+        self.emit(UiEvent::Prompt { secret, text, passive });
         if passive {
             self.maybe_rearm();
         }
@@ -592,10 +621,10 @@ impl Auth {
                     // that session is not what the screen asks for.
                     self.abandon_conversation();
                     if passive {
-                        self.bus.emit(&UiEvent::Info(String::new()));
+                        self.emit(UiEvent::Info(String::new()));
                     } else {
-                        self.bus.emit(&UiEvent::Busy(false));
-                        self.bus.emit(&UiEvent::AuthError(USERNAME_CHANGED.into()));
+                        self.emit(UiEvent::Busy(false));
+                        self.emit(UiEvent::AuthError(self.texts.username_changed.clone()));
                     }
                     self.start_eager(&shown);
                     return;
@@ -604,20 +633,20 @@ impl Auth {
                     // A match on a VT nobody looks at: starting the session
                     // would pull the screen over to it.
                     self.abandon_conversation();
-                    self.bus.emit(&UiEvent::Info(String::new()));
+                    self.emit(UiEvent::Info(String::new()));
                     self.pending_rearm.set(true);
                     return self.wait_for_seat();
                 }
                 let (cmd, env) = (self.hooks.resolve_start)(&user);
                 info!("authenticated; starting session: {}", cmd.join(" "));
                 *self.phase.borrow_mut() = Phase::Starting;
-                self.bus.emit(&UiEvent::Busy(true));
+                self.emit(UiEvent::Busy(true));
                 self.send(Request::StartSession { cmd, env });
             }
             Phase::Starting => {
                 if self.demo {
-                    self.bus.emit(&UiEvent::Info("demo: session would start now".into()));
-                    self.bus.emit(&UiEvent::Busy(false));
+                    self.emit(UiEvent::Info("demo: session would start now".into()));
+                    self.emit(UiEvent::Busy(false));
                 } else {
                     (self.hooks.on_started)();
                 }
@@ -629,7 +658,7 @@ impl Auth {
     fn transport_dead(&self, why: &str) {
         error!("greetd transport failed: {why}");
         if self.demo {
-            self.bus.emit(&UiEvent::AuthError(format!("demo transport error: {why}")));
+            self.emit(UiEvent::AuthError(format!("demo transport error: {why}")));
             return;
         }
         std::process::exit(2);
@@ -701,6 +730,15 @@ mod tests {
         options: config::Auth,
         scenario: impl FnOnce(&Rc<Auth>, &dyn Fn()),
     ) -> Vec<String> {
+        drive_texts(backend, options, config::Texts::default(), scenario)
+    }
+
+    fn drive_texts(
+        backend: Box<dyn Backend>,
+        options: config::Auth,
+        texts: config::Texts,
+        scenario: impl FnOnce(&Rc<Auth>, &dyn Fn()),
+    ) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         show("edraven");
@@ -719,6 +757,8 @@ mod tests {
                     UiEvent::AuthError(text) => format!("autherror {text}"),
                     UiEvent::Busy(busy) => format!("busy {busy}"),
                     UiEvent::SessionChanged(index) => format!("session {index}"),
+                    UiEvent::Focus(target) => format!("focus {target:?}"),
+                    UiEvent::UsernameChanged(name) => format!("username {name}"),
                 });
             });
             let auth = Auth::start(
@@ -726,6 +766,7 @@ mod tests {
                 bus,
                 true,
                 &options,
+                &texts,
                 Hooks {
                     current_username: Box::new(|| SHOWN.with(|shown| shown.borrow().clone())),
                     resolve_start: Box::new(|_| (vec!["true".into()], vec![])),
@@ -756,11 +797,15 @@ mod tests {
     fn eager(rearm_window: u64) -> config::Auth {
         let rearm_window =
             if rearm_window == 0 { Rearm::Never } else { Rearm::Window(rearm_window) };
-        config::Auth { eager: true, rearm_window }
+        config::Auth { eager: true, rearm_window, ..Default::default() }
     }
 
     fn eager_always() -> config::Auth {
-        config::Auth { eager: true, rearm_window: Rearm::Always }
+        config::Auth { eager: true, rearm_window: Rearm::Always, ..Default::default() }
+    }
+
+    fn rules(toml: &str) -> config::Texts {
+        toml::from_str(toml).unwrap()
     }
 
     /// Pumps until `done` holds, for at most two seconds.
@@ -1377,7 +1422,7 @@ mod tests {
             pump();
         });
         assert_eq!(requests(&seen), ["create edraven", "respond Some(\"pw\")", "cancel"]);
-        let error = format!("autherror {USERNAME_CHANGED}");
+        let error = format!("autherror {}", config::Texts::default().username_changed);
         assert_eq!(log.last(), Some(&error), "{log:?}");
         assert!(!log.iter().any(|e| e.contains("would start")), "{log:?}");
     }
@@ -1479,6 +1524,58 @@ mod tests {
         });
         assert_eq!(requests(&seen), ["create edraven"]);
         assert_eq!(log, ["busy false", "prompt[true,passive] Password:"]);
+    }
+
+    #[test]
+    fn prompt_and_failure_texts_are_rewritten_on_their_way_out() {
+        let texts = rules(
+            "[[rewrite]]\nmatch = \"Password\"\ntext = \"Passwort:\"\nkind = \"prompt\"\n\
+             [[rewrite]]\nmatch = \"wrong\"\ntext = \"nope\"\nkind = \"failure\"\n",
+        );
+        let (backend, _, _) = scripted(password_only);
+        let log = drive_texts(backend, eager(0), texts, |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("fail".into());
+            pump();
+        });
+        assert!(log.contains(&"prompt[true,passive] Passwort:".to_string()), "{log:?}");
+        assert!(log.contains(&"autherror nope".to_string()), "{log:?}");
+        assert!(!log.iter().any(|e| e.contains("wrong")), "{log:?}");
+    }
+
+    #[test]
+    fn a_dropped_info_is_never_emitted_and_a_clear_still_is() {
+        let texts = rules("[[rewrite]]\nmatch = \"Place your\"\ntext = \"\"\n");
+        let (backend, _, _) = scripted(fprint);
+        let log = drive_texts(backend, eager(0), texts, |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.start_eager("");
+            pump();
+        });
+        let expected = [
+            "info Verification timed out",
+            "busy false",
+            "prompt[true,passive] Password:",
+            "info ",
+        ];
+        assert_eq!(log, expected);
+    }
+
+    #[test]
+    fn the_built_in_texts_come_from_config() {
+        let texts = rules("enter-username = \"Wer bist du?\"\n");
+        let log = drive_texts(
+            Box::new(DemoBackend::new()),
+            config::Auth::default(),
+            texts,
+            |auth, pump| {
+                auth.begin(String::new(), "pw".into());
+                pump();
+            },
+        );
+        assert_eq!(log, ["autherror Wer bist du?"]);
     }
 
     #[test]

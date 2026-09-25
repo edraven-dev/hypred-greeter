@@ -54,8 +54,16 @@ fn main() {
         let mut problems = loaded.problems.clone();
         problems.extend(ui::load_css(&style));
 
+        let saved = state::load();
+        let initial_username = saved
+            .last_user
+            .clone()
+            .or_else(|| loaded.config.auth.user.clone())
+            .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
+            .unwrap_or_default();
+
         let layout_path = loaded.resolve(args.layout.as_deref(), &loaded.config.paths.layout);
-        let layout = layout::load(&layout_path, !args.demo);
+        let layout = layout::load(&layout_path, !args.demo, !initial_username.is_empty());
         for problem in &layout.problems {
             log::error!("{problem}");
         }
@@ -73,16 +81,11 @@ fn main() {
             }
         };
 
-        let session_list = sessions::discover();
+        let session_list =
+            sessions::apply(sessions::discover(), &loaded.config.sessions, &mut problems);
         if session_list.is_empty() {
             problems.push("no sessions found in wayland-sessions/xsessions".into());
         }
-        let saved = state::load();
-        let initial_username = saved
-            .last_user
-            .clone()
-            .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
-            .unwrap_or_default();
         let default_session = loaded.config.sessions.default.as_deref();
         if let Some(id) = default_session {
             if !session_list.iter().any(|s| s.matches_cache_id(id)) {
@@ -102,6 +105,7 @@ fn main() {
             bus.clone(),
             args.demo,
             &loaded.config.auth,
+            &loaded.config.texts,
             auth::Hooks {
                 current_username: Box::new(move || current.username.borrow().clone()),
                 resolve_start: Box::new(move |username: &str| {
@@ -152,6 +156,7 @@ fn main() {
         window.add_css_class("hg-window");
         window.set_widget_name("hg-window");
         window.set_child(Some(&ui::window_content(&problems, root)));
+        handle.emit(&ui::bus::UiEvent::UsernameChanged(handle.username()));
         if args.demo {
             // No title bar: the published viewport is the surface's size,
             // and the live greeter has none either.

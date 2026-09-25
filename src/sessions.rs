@@ -89,6 +89,41 @@ fn discover_in(data_dirs: &str) -> Vec<Session> {
     sessions
 }
 
+/// `[sessions]` only/hide, names and the X11 suffix, then the order —
+/// once, so every consumer after it sees the same list. Ids that match
+/// nothing are reported, not fatal.
+pub fn apply(
+    mut sessions: Vec<Session>,
+    cfg: &config::Sessions,
+    problems: &mut Vec<String>,
+) -> Vec<Session> {
+    let listed = [("only", &cfg.only), ("hide", &cfg.hide), ("order", &cfg.order)];
+    let names: Vec<String> = cfg.names.keys().cloned().collect();
+    for (key, ids) in listed.into_iter().chain([("names", &names)]) {
+        for id in ids.iter().filter(|id| !sessions.iter().any(|s| s.matches_cache_id(id))) {
+            problems.push(format!("sessions.{key}: `{id}` matches no installed session"));
+        }
+    }
+
+    if !cfg.only.is_empty() {
+        sessions.retain(|s| cfg.only.iter().any(|id| s.matches_cache_id(id)));
+    }
+    sessions.retain(|s| !cfg.hide.iter().any(|id| s.matches_cache_id(id)));
+    for session in &mut sessions {
+        match cfg.names.iter().find(|(id, _)| session.matches_cache_id(id)) {
+            Some((_, name)) => session.name = name.clone(),
+            None if session.kind == Kind::X11 => session.name.push_str(&cfg.x11_suffix),
+            None => {}
+        }
+    }
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    let rank = |s: &Session| {
+        cfg.order.iter().position(|id| s.matches_cache_id(id)).unwrap_or(cfg.order.len())
+    };
+    sessions.sort_by_key(rank);
+    sessions
+}
+
 fn parse_desktop(text: &str, stem: &str, kind: Kind) -> Option<Session> {
     let mut in_entry = false;
     let (mut name, mut exec, mut desktop_names) = (None, None, None);
@@ -231,6 +266,91 @@ mod tests {
         let sessions = discover_in(&tree.dirs(&["a", "b"]));
         let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["Sway"]);
+    }
+
+    fn found(entries: &[(&str, &str, Kind)]) -> Vec<Session> {
+        entries
+            .iter()
+            .map(|(stem, name, kind)| Session {
+                name: name.to_string(),
+                exec: vec![stem.to_string()],
+                kind: *kind,
+                stem: stem.to_string(),
+                desktop_names: None,
+            })
+            .collect()
+    }
+
+    fn installed() -> Vec<Session> {
+        found(&[
+            ("hyprland", "Hyprland", Kind::Wayland),
+            ("hyprland-uwsm", "Hyprland (uwsm-managed)", Kind::Wayland),
+            ("plasma", "Plasma", Kind::X11),
+            ("sway", "Sway", Kind::Wayland),
+        ])
+    }
+
+    fn names(sessions: &[Session]) -> Vec<&str> {
+        sessions.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn apply_with_defaults_only_adds_the_x11_suffix() {
+        let mut problems = Vec::new();
+        let sessions = apply(installed(), &config::Sessions::default(), &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        let expected = ["Hyprland", "Hyprland (uwsm-managed)", "Plasma (X11)", "Sway"];
+        assert_eq!(names(&sessions), expected);
+    }
+
+    #[test]
+    fn apply_only_and_hide_filter_by_id() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions {
+            only: vec!["wayland/hyprland-uwsm".into(), "x11/plasma".into(), "wayland/sway".into()],
+            hide: vec!["wayland/sway".into()],
+            x11_suffix: String::new(),
+            ..Default::default()
+        };
+        let sessions = apply(installed(), &cfg, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(names(&sessions), ["Hyprland (uwsm-managed)", "Plasma"]);
+    }
+
+    #[test]
+    fn apply_renames_then_orders_the_listed_first_and_the_rest_by_name() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions {
+            order: vec!["wayland/sway".into(), "wayland/hyprland-uwsm".into()],
+            names: [("x11/plasma".to_string(), "KDE".to_string())].into(),
+            ..Default::default()
+        };
+        let sessions = apply(installed(), &cfg, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(names(&sessions), ["Sway", "Hyprland (uwsm-managed)", "Hyprland", "KDE"]);
+        assert_eq!(sessions[1].cache_id(), "wayland/hyprland-uwsm");
+    }
+
+    #[test]
+    fn apply_reports_ids_that_match_nothing() {
+        let mut problems = Vec::new();
+        let cfg = config::Sessions {
+            only: vec!["wayland/hyprland".into(), "wayland/gnome".into()],
+            hide: vec!["x11/i3".into()],
+            order: vec!["wayland/typo".into()],
+            names: [("wayland/nope".to_string(), "Nope".to_string())].into(),
+            ..Default::default()
+        };
+        let sessions = apply(installed(), &cfg, &mut problems);
+        assert_eq!(names(&sessions), ["Hyprland"]);
+        problems.sort();
+        let expected = [
+            "sessions.hide: `x11/i3` matches no installed session",
+            "sessions.names: `wayland/nope` matches no installed session",
+            "sessions.only: `wayland/gnome` matches no installed session",
+            "sessions.order: `wayland/typo` matches no installed session",
+        ];
+        assert_eq!(problems, expected);
     }
 
     #[test]

@@ -82,7 +82,10 @@ impl WidgetDef for MessageDef {
                     error_since.set(None);
                     show(&label, if *secret { "" } else { text }, false);
                 }
-                UiEvent::Busy(_) | UiEvent::SessionChanged(_) => {}
+                UiEvent::Busy(_)
+                | UiEvent::SessionChanged(_)
+                | UiEvent::Focus(_)
+                | UiEvent::UsernameChanged(_) => {}
             }
         });
         Ok(label.upcast())

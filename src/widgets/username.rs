@@ -2,6 +2,7 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 
 use crate::layout::Node;
+use crate::ui::bus::{FocusTarget, UiEvent};
 use crate::ui::ctx::BuildCtx;
 use crate::widgets::{WidgetDef, WidgetError};
 
@@ -27,6 +28,15 @@ impl WidgetDef for UsernameDef {
         entry.connect_activate(move |entry| {
             entry.emit_move_focus(gtk::DirectionType::TabForward);
             app.auth.start_eager(&app.username());
+        });
+
+        let weak = entry.downgrade();
+        ctx.bus.subscribe(move |event| {
+            if let UiEvent::Focus(FocusTarget::Username) = event {
+                if let Some(entry) = weak.upgrade() {
+                    entry.grab_focus();
+                }
+            }
         });
         Ok(entry.upcast())
     }

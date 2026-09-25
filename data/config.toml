@@ -35,10 +35,16 @@ eager = false
 # touch logs in whenever you walk up; N — for N seconds after the last
 # input, then on the next input; 0 — never.
 rearm-window = 0
+# The username shown when nothing is remembered yet (a layout without a
+# `username` widget needs one).
+# user = "edraven"
 
 [commands]
+# Any name = argv; a `button` runs one by name (action = "suspend"). reboot
+# and poweroff are the power widget's, kept unless overridden here.
 reboot = ["systemctl", "reboot"]
 poweroff = ["systemctl", "poweroff"]
+# suspend = ["systemctl", "suspend"]
 
 [sessions]
 # Prepended to the Exec of X11 sessions (from xsessions/ dirs).
@@ -48,3 +54,30 @@ x11-prefix = ["startx", "/usr/bin/env"]
 # Preselected for a user with no session remembered yet (else the first by
 # name): "<wayland|x11>/<desktop file stem>".
 # default = "wayland/hyprland-uwsm"
+# Same ids: `only` keeps just these, `hide` drops these, `order` lists
+# these first (the rest follow by name). An id that matches nothing is
+# named in the banner.
+# only = ["wayland/hyprland-uwsm", "x11/plasma"]
+# hide = ["wayland/hyprland"]
+# order = ["wayland/hyprland-uwsm"]
+# Appended to the display name of X11 sessions.
+x11-suffix = " (X11)"
+# Display names per id (a renamed X11 session gets no suffix).
+# [sessions.names]
+# "wayland/hyprland-uwsm" = "Hyprland"
+
+[texts]
+# The greeter's own messages; {program} and {error} are filled in.
+enter-username = "enter a username"
+username-changed = "username changed — enter the password again"
+auth-failed = "authentication failed"
+power-failed = "{program}: {error}"
+# Rewrite rules for everything shown — PAM info and errors, prompts,
+# failures: the first rule whose `match` is found in the text (a
+# substring; with `regex = true` a glib::Regex pattern, `\1` references
+# allowed in `text`) replaces it with `text`; "" drops the message; `kind`
+# (info | error | prompt | failure) limits a rule to one kind.
+# [[texts.rewrite]]
+# match = "Place your"
+# text = "Touch the fingerprint reader"
+# kind = "info"

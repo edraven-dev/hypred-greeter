@@ -8,7 +8,7 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 
 use crate::layout::Node;
-use crate::ui::bus::UiEvent;
+use crate::ui::bus::{FocusTarget, UiEvent};
 use crate::ui::ctx::BuildCtx;
 use crate::widgets::{WidgetDef, WidgetError};
 
@@ -78,13 +78,15 @@ impl WidgetDef for PasswordDef {
                     entry.set_text("");
                     entry.grab_focus();
                 }
-                UiEvent::Prompt { passive: false, .. } => {
+                UiEvent::Prompt { passive: false, .. } | UiEvent::Focus(FocusTarget::Password) => {
                     entry.grab_focus();
                 }
                 UiEvent::Prompt { passive: true, .. }
                 | UiEvent::Info(_)
                 | UiEvent::PamError(_)
-                | UiEvent::SessionChanged(_) => {}
+                | UiEvent::SessionChanged(_)
+                | UiEvent::Focus(FocusTarget::Username)
+                | UiEvent::UsernameChanged(_) => {}
             }
         });
         Ok(entry.upcast())

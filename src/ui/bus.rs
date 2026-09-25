@@ -20,6 +20,15 @@ pub enum UiEvent {
     AuthError(String),
     Busy(bool),
     SessionChanged(usize),
+    Focus(FocusTarget),
+    /// The username entry's text; also emitted once at startup.
+    UsernameChanged(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    Username,
+    Password,
 }
 
 type Subscriber = Rc<dyn Fn(&UiEvent)>;

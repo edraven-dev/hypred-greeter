@@ -59,6 +59,9 @@ entry.hg-password {
 /* a submitted password is on its way — the entry is read-only meanwhile */
 entry.hg-password.hg-password-busy { opacity: 0.55; }
 
+/* a `button` with both an icon and a label: the gap between them */
+.hg-button > box { border-spacing: 6px; }
+
 .hg-message { color: @muted; }
 .hg-message.hg-message-error { color: @danger; }
 
