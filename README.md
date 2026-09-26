@@ -24,7 +24,7 @@ Not on the AUR yet — build with `makepkg` straight from a clone:
 ```sh
 git clone https://github.com/edraven-dev/hypred-greeter.git
 cd hypred-greeter/pkg
-makepkg -si -p PKGBUILD-git   # or PKGBUILD to build the pinned v0.1.0 release
+makepkg -si -p PKGBUILD-git   # or PKGBUILD to build the pinned v0.3.0 release
 ```
 
 Point greetd at it in `/etc/greetd/config.toml`. Under
