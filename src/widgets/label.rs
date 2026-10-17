@@ -36,7 +36,8 @@ impl Template {
         Self::parse_with(text, false)
     }
 
-    /// Command output: an unknown or unclosed placeholder is plain text.
+    /// Command output is data: only an exact placeholder is one, every other
+    /// brace (`{{` and `}}` too) is plain text.
     fn parse_lenient(text: &str) -> Self {
         Self::parse_with(text, true).expect("lenient parsing has no error")
     }
@@ -44,46 +45,42 @@ impl Template {
     fn parse_with(text: &str, lenient: bool) -> Result<Self, String> {
         let mut pieces = Vec::new();
         let mut literal = String::new();
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            if (c == '{' || c == '}') && chars.peek() == Some(&c) {
-                chars.next();
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            if matches!(c, '{' | '}') && rest[1..].starts_with(c) {
+                literal.push_str(if lenient { &rest[..2] } else { &rest[..1] });
+                rest = &rest[2..];
+                continue;
+            }
+            if c != '{' {
                 literal.push(c);
-            } else if c == '{' {
-                let mut name = String::new();
-                let closed = loop {
-                    match chars.next() {
-                        Some('}') => break true,
-                        Some(c) => name.push(c),
-                        None => break false,
-                    }
-                };
-                let hole = match (closed, Self::hole(&name)) {
-                    (true, Some(hole)) => hole,
-                    (true, None) if lenient => {
-                        literal.push_str(&format!("{{{name}}}"));
-                        continue;
-                    }
-                    (false, _) if lenient => {
-                        literal.push_str(&format!("{{{name}"));
-                        continue;
-                    }
-                    (true, None) => {
-                        return Err(format!(
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+            let after = &rest[1..];
+            let end = after.find('}');
+            let name = &after[..end.unwrap_or(after.len())];
+            let hole = match (end, Self::hole(name)) {
+                (Some(_), Some(hole)) if !lenient || Self::exact(name, &hole) => hole,
+                _ if lenient => {
+                    literal.push('{');
+                    rest = after;
+                    continue;
+                }
+                (Some(_), _) => {
+                    return Err(format!(
                         "unknown placeholder `{{{name}}}` (user, hostname, session, time:FORMAT)"
                     ))
-                    }
-                    (false, _) => {
-                        return Err(format!("unclosed `{{{name}` (a literal brace is `{{{{`)"))
-                    }
-                };
-                if !literal.is_empty() {
-                    pieces.push(Piece::Text(std::mem::take(&mut literal)));
                 }
-                pieces.push(Piece::Hole(hole));
-            } else {
-                literal.push(c);
+                (None, _) => {
+                    return Err(format!("unclosed `{{{name}` (a literal brace is `{{{{`)"))
+                }
+            };
+            if !literal.is_empty() {
+                pieces.push(Piece::Text(std::mem::take(&mut literal)));
             }
+            pieces.push(Piece::Hole(hole));
+            rest = &after[name.len() + 1..];
         }
         if !literal.is_empty() {
             pieces.push(Piece::Text(literal));
@@ -98,6 +95,16 @@ impl Template {
             "session" => Placeholder::Session,
             _ => Placeholder::Time(name.strip_prefix("time:")?.to_string()),
         })
+    }
+
+    /// In data a `{` inside the braces makes the outer one plain text, and
+    /// a time that cannot format stays as it was rather than going blank.
+    fn exact(name: &str, hole: &Placeholder) -> bool {
+        !name.contains('{')
+            && match hole {
+                Placeholder::Time(format) => clock::now(format).is_some(),
+                _ => true,
+            }
     }
 
     fn time_formats(&self) -> impl Iterator<Item = &str> {
@@ -358,6 +365,32 @@ mod tests {
         assert_eq!(template.render(fixed, true, true), "{json: 1} alice &lt;b&gt; {unclosed");
         assert_eq!(Template::parse_lenient("<i>x</i>").render(fixed, true, false), "<i>x</i>");
         assert!(Template::parse("{json: 1}").is_err());
+    }
+
+    #[test]
+    fn command_output_keeps_every_brace_but_exact_placeholders() {
+        for text in [
+            r#"{"k":{"v":{"w":1}}}"#,
+            r#"[{"a":1},{"b":2}]"#,
+            "{{a}}",
+            "a}}b",
+            "a{{b",
+            "{{user}}",
+            "}}",
+            "{{",
+            "{}",
+            "{ user }",
+            "{User}",
+            "{time:%Q}",
+            "{user",
+        ] {
+            assert_eq!(Template::parse_lenient(text).render(fixed, false, true), text, "{text}");
+        }
+        let json = Template::parse_lenient(r#"{"who":"{user}","at":{"h":"{time:%H}"}}"#);
+        assert_eq!(json.render(fixed, false, true), r#"{"who":"alice","at":{"h":"time(%H)"}}"#);
+        assert_eq!(Template::parse_lenient("{{{user}}}").render(fixed, false, true), "{{alice}}");
+        let escaped = Template::parse_lenient("{{a}} & {user}").render(fixed, true, true);
+        assert_eq!(escaped, "{{a}} &amp; alice");
     }
 
     #[test]
