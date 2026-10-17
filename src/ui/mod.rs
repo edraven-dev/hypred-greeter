@@ -238,16 +238,24 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
     }
 }
 
+/// `.hg-starting` survives the Busy(false) that ends a --demo start, so a
+/// theme can preview it until the next attempt.
 fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
     match event {
-        UiEvent::Busy(true) => vec![("hg-busy", true), ("hg-failed", false)],
-        UiEvent::Busy(false) => vec![("hg-busy", false), ("hg-starting", false)],
-        UiEvent::AuthError(_) | UiEvent::PamError(_) => {
-            vec![("hg-failed", true), ("hg-info", false)]
+        UiEvent::Busy(true) => {
+            vec![("hg-busy", true), ("hg-failed", false), ("hg-starting", false)]
         }
-        UiEvent::Prompt { .. } => vec![("hg-failed", false), ("hg-info", false)],
+        UiEvent::Busy(false) => vec![("hg-busy", false)],
+        UiEvent::AuthError(_) | UiEvent::PamError(_) => {
+            vec![("hg-failed", true), ("hg-info", false), ("hg-starting", false)]
+        }
+        UiEvent::Prompt { .. } => {
+            vec![("hg-failed", false), ("hg-info", false), ("hg-starting", false)]
+        }
         UiEvent::Info(text) => vec![("hg-failed", false), ("hg-info", !text.is_empty())],
-        UiEvent::Armed(true) => vec![("hg-armed", true), ("hg-failed", false)],
+        UiEvent::Armed(true) => {
+            vec![("hg-armed", true), ("hg-failed", false), ("hg-starting", false)]
+        }
         UiEvent::Armed(false) => vec![("hg-armed", false)],
         UiEvent::Starting => vec![("hg-starting", true)],
         UiEvent::SessionChanged(_) | UiEvent::Focus(_) | UiEvent::UsernameChanged(_) => Vec::new(),
@@ -489,9 +497,50 @@ mod tests {
         assert_eq!(on(&UiEvent::Armed(true), "hg-armed"), Some(true));
         assert_eq!(on(&UiEvent::Armed(false), "hg-armed"), Some(false));
         assert_eq!(on(&UiEvent::Starting, "hg-starting"), Some(true));
-        assert_eq!(on(&UiEvent::Busy(false), "hg-starting"), Some(false));
+        assert_eq!(on(&UiEvent::Busy(false), "hg-starting"), None);
+        assert_eq!(on(&UiEvent::Info("demo: session would start now".into()), "hg-starting"), None);
+        for next in [
+            UiEvent::AuthError("could not start".into()),
+            UiEvent::PamError("no".into()),
+            UiEvent::Busy(true),
+            UiEvent::Armed(true),
+            UiEvent::Prompt { secret: true, text: "Password:".into(), passive: true },
+        ] {
+            assert_eq!(on(&next, "hg-starting"), Some(false), "{next:?}");
+        }
         assert!(state_changes(&UiEvent::Focus(FocusTarget::Password)).is_empty());
         assert!(state_changes(&UiEvent::SessionChanged(1)).is_empty());
         assert!(state_changes(&UiEvent::UsernameChanged("bob".into())).is_empty());
+    }
+
+    fn classes_after(events: &[UiEvent]) -> Vec<&'static str> {
+        let mut classes = std::collections::BTreeSet::new();
+        for (class, on) in events.iter().flat_map(state_changes) {
+            if on {
+                classes.insert(class);
+            } else {
+                classes.remove(class);
+            }
+        }
+        classes.into_iter().collect()
+    }
+
+    #[test]
+    fn a_demo_start_stays_on_screen_until_the_next_attempt() {
+        let started = vec![
+            UiEvent::Busy(true),
+            UiEvent::Busy(true),
+            UiEvent::Starting,
+            UiEvent::Info("demo: session would start now".into()),
+            UiEvent::Busy(false),
+        ];
+        assert_eq!(classes_after(&started), ["hg-info", "hg-starting"]);
+        let next = [started.clone(), vec![UiEvent::Busy(true)]].concat();
+        assert_eq!(classes_after(&next), ["hg-busy", "hg-info"]);
+
+        let refused =
+            [&started[..3], &[UiEvent::Busy(false), UiEvent::AuthError("could not start".into())]]
+                .concat();
+        assert_eq!(classes_after(&refused), ["hg-failed"]);
     }
 }

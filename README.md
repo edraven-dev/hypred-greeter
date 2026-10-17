@@ -233,7 +233,7 @@ message label:
 | `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
 | `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
-| `.hg-starting` | the session is being started (stays until the greeter exits) |
+| `.hg-starting` | the session is being started: under greetd until the greeter exits, a round trip later (too soon for a transition to show); in `--demo`, where nothing starts, until the next attempt (a submission, re-arm or prompt), so a theme can preview it; a failed start drops it |
 | `.hg-caps-lock` | Caps Lock is on |
 | `.hg-demo` | running with `--demo` |
 | `.hg-problems` | the banner is shown |
