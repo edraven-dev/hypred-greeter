@@ -162,6 +162,7 @@ fn main() {
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
         let focus_placed = layout::requests_focus(&layout.root);
+        let shortcuts = actions::shortcuts(&loaded.config, &handle, args.demo, &mut problems);
 
         let window =
             gtk::ApplicationWindow::builder().application(app).title("hypred-greeter").build();
@@ -218,6 +219,9 @@ fn main() {
             gtk::glib::Propagation::Proceed
         });
         window.add_controller(activity);
+        // After the activity watcher: a bound key stops the event, and it
+        // still counts as input.
+        window.add_controller(shortcuts);
         handle.auth.start_eager(&handle.username());
     });
 

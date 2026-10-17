@@ -1,6 +1,6 @@
 use gtk4::glib;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/greetd/hypred-greeter/config.toml";
@@ -13,6 +13,8 @@ pub struct Config {
     pub gtk: Gtk,
     pub auth: Auth,
     pub commands: Commands,
+    /// Accelerator as GTK reads it → action name.
+    pub keys: BTreeMap<String, String>,
     pub sessions: Sessions,
     pub texts: Texts,
 }
@@ -403,6 +405,12 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_config_names_only_known_keys() {
+        let (_, unknown) = parse(include_str!("../data/config.toml")).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
     fn a_commands_table_adds_and_overrides_but_keeps_the_rest() {
         let text = "[commands]\nsuspend = [\"systemctl\", \"suspend\"]\nreboot = [\"loginctl\", \"reboot\"]\n";
         let (config, unknown) = parse(text).unwrap();
@@ -418,6 +426,22 @@ mod tests {
         assert_eq!(parse("").unwrap().0.auth.user, None);
         let config = parse("[auth]\nuser = \"edraven\"\n").unwrap().0;
         assert_eq!(config.auth.user.as_deref(), Some("edraven"));
+    }
+
+    #[test]
+    fn keys_keep_their_accelerators_verbatim() {
+        let text = "[keys]\n\"<Control><Alt>Delete\" = \"reboot\"\nF2 = \"next-session\"\n\
+                    \"<Super>s\" = \"suspend\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let keys: Vec<(&str, &str)> =
+            config.keys.iter().map(|(key, action)| (key.as_str(), action.as_str())).collect();
+        assert_eq!(
+            keys,
+            [("<Control><Alt>Delete", "reboot"), ("<Super>s", "suspend"), ("F2", "next-session")]
+        );
+        assert!(parse("").unwrap().0.keys.is_empty());
+        assert!(parse("[keys]\nF2 = 2\n").is_err());
     }
 
     #[test]

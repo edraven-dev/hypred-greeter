@@ -52,6 +52,15 @@ reboot = ["systemctl", "reboot"]
 poweroff = ["systemctl", "poweroff"]
 # suspend = ["systemctl", "suspend"]
 
+[keys]
+# A key as GTK writes it → an action, named as a `button` names it: cancel,
+# next-session, prev-session, focus-username, focus-password, or a
+# [commands] name. Works whatever has the focus; a key an entry takes as
+# input (a character, Enter, Tab, Backspace, Delete, Escape) needs
+# <Control>, <Alt> or <Super>.
+# "<Control><Alt>Delete" = "reboot"
+# F2 = "next-session"
+
 [sessions]
 # Prepended to the Exec of X11 sessions (from xsessions/ dirs).
 x11-prefix = ["startx", "/usr/bin/env"]

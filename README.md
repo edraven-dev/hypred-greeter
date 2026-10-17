@@ -60,12 +60,31 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 | `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (`dark` is then off: GTK has no Empty-dark) | unset (GTK defaults) |
 | `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `30`, `400` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
+| `[keys]` | a map: `"<accelerator>" = "action"` — a key as GTK writes it (`"<Control><Alt>Delete"`, `F2`, `"<Super>l"`) to an action as a `button` names it — see below | none |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
 | `[texts]` | `enter-username`, `username-changed`, `auth-failed` (when greetd's error has no text), `power-failed` (`{program}`, `{error}`); `[[texts.rewrite]]` entries — see below | the built-in English strings |
 
 A key the greeter does not know (a typo like `rearm_window`) keeps its
 default in force and is named in the on-screen banner. An id in
 `[sessions]` that matches no installed session is named there too.
+
+**Key bindings.** `[keys]` runs an action on a key, whatever has the
+focus — a built-in (`cancel`, `next-session`, `prev-session`,
+`focus-username`, `focus-password`) or a `[commands]` name, exactly as
+`button` takes it:
+
+```toml
+[keys]
+"<Control><Alt>Delete" = "reboot"
+F2 = "next-session"
+"<Shift>F2" = "prev-session"
+```
+
+A key an entry takes as input (a character, Enter, Tab, Backspace, Delete,
+Escape — on the keypad too) needs `<Control>`, `<Alt>` or `<Super>`. Such a
+key, one GTK cannot read, an unknown action and a key bound twice
+(`<Ctrl>r`, `<Control>r`: the first wins) are named in the banner.
+`--demo` announces a command instead of running it.
 
 **Rewriting texts.** Every text shown — PAM's info and error messages,
 prompts, the failure after a wrong password, the greeter's own — passes
