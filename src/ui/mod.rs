@@ -304,16 +304,11 @@ pub fn apply_gtk_settings(cfg: &config::Gtk) {
         error!("no gtk settings on default display");
         return;
     };
-    if let Some(dark) = cfg.dark {
-        settings.set_gtk_application_prefer_dark_theme(dark);
+    if let Some(dark) = dark_scheme(cfg) {
+        set_color_scheme(&settings, dark);
     }
     if let Some(theme) = &cfg.theme {
         settings.set_gtk_theme_name(Some(theme));
-        // There is no Empty-dark; GTK would silently fall back to
-        // Default-dark and the blank slate would not be one.
-        if theme == "Empty" {
-            settings.set_gtk_application_prefer_dark_theme(false);
-        }
     }
     if let Some(icons) = &cfg.icon_theme {
         settings.set_gtk_icon_theme_name(Some(icons));
@@ -323,6 +318,33 @@ pub fn apply_gtk_settings(cfg: &config::Gtk) {
     }
     if let Some(font) = &cfg.font {
         settings.set_gtk_font_name(Some(font));
+    }
+}
+
+/// Decided before the theme name is set: GTK has no Empty-dark, and Empty
+/// loaded while the scheme is dark falls back to Default; turning the
+/// scheme light afterwards only turns that Default light (GTK 4.24).
+fn dark_scheme(cfg: &config::Gtk) -> Option<bool> {
+    if cfg.theme.as_deref() == Some("Empty") {
+        return Some(false);
+    }
+    cfg.dark
+}
+
+/// gtk-interface-color-scheme (GTK 4.20) is looked up at runtime: the
+/// binding is built for 4.12. GTK 4.23 turned prefer-dark into a deprecated
+/// alias of it that warns on every write; before, the theme variant came
+/// from prefer-dark alone, so an older GTK gets that too.
+fn set_color_scheme(settings: &gtk::Settings, dark: bool) {
+    let scheme = settings
+        .find_property("gtk-interface-color-scheme")
+        .and_then(|pspec| glib::EnumClass::with_type(pspec.value_type()))
+        .and_then(|class| class.to_value_by_nick(if dark { "dark" } else { "light" }));
+    if let Some(scheme) = &scheme {
+        settings.set_property_from_value("gtk-interface-color-scheme", scheme);
+    }
+    if scheme.is_none() || gtk::check_version(4, 23, 0).is_some() {
+        settings.set_gtk_application_prefer_dark_theme(dark);
     }
 }
 
@@ -368,6 +390,21 @@ mod tests {
         assert_eq!(shown[..5], lines[..5]);
         assert_eq!(shown[5], "css: +2 more");
         assert_eq!(capped(lines[..5].to_vec(), 5), lines[..5]);
+    }
+
+    #[test]
+    fn the_empty_theme_is_always_light() {
+        let gtk = |dark: Option<bool>, theme: Option<&str>| config::Gtk {
+            dark,
+            theme: theme.map(Into::into),
+            ..Default::default()
+        };
+        assert_eq!(dark_scheme(&gtk(Some(true), Some("Empty"))), Some(false));
+        assert_eq!(dark_scheme(&gtk(None, Some("Empty"))), Some(false));
+        assert_eq!(dark_scheme(&gtk(Some(true), Some("adw-gtk3-dark"))), Some(true));
+        assert_eq!(dark_scheme(&gtk(Some(false), Some("Default"))), Some(false));
+        assert_eq!(dark_scheme(&gtk(Some(true), None)), Some(true));
+        assert_eq!(dark_scheme(&gtk(None, Some("adw-gtk3"))), None);
     }
 
     fn ms(millis: u64) -> Duration {
