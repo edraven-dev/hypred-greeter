@@ -130,25 +130,18 @@ pub fn track_states(window: &gtk::ApplicationWindow, bus: &Bus) {
     keyboard.connect_caps_lock_state_notify(caps_lock);
 }
 
-/// `.hg-failed` with its hold; a failure while it is still on drops it for
-/// a frame so a CSS animation restarts (see message.rs).
+/// `.hg-failed` with its hold. Every failure takes the class off and puts
+/// it back on the second frame, so a CSS animation restarts even when a
+/// clear took it off earlier in the same frame: GTK would otherwise merge
+/// the two changes (see message.rs).
 #[derive(Default)]
 struct Failed {
-    since: Cell<Option<Instant>>,
-    /// Bumped by every failure: a timer or tick from before is stale.
-    ticket: Cell<u64>,
+    state: RefCell<FailedState>,
 }
 
 impl Failed {
     fn set(self: &Rc<Self>, window: &gtk::ApplicationWindow) {
-        let repeated = window.has_css_class("hg-failed");
-        self.since.set(Some(Instant::now()));
-        let ticket = self.ticket.get() + 1;
-        self.ticket.set(ticket);
-        if !repeated {
-            window.add_css_class("hg-failed");
-            return;
-        }
+        let ticket = self.state.borrow_mut().fail(Instant::now());
         window.remove_css_class("hg-failed");
         let (me, ticks) = (self.clone(), Cell::new(0));
         window.add_tick_callback(move |window, _| {
@@ -156,7 +149,7 @@ impl Failed {
             if ticks.get() < 2 {
                 return glib::ControlFlow::Continue;
             }
-            if me.ticket.get() == ticket {
+            if me.state.borrow().current(ticket) {
                 window.add_css_class("hg-failed");
             }
             glib::ControlFlow::Break
@@ -164,23 +157,71 @@ impl Failed {
     }
 
     fn clear(self: &Rc<Self>, window: &gtk::ApplicationWindow) {
-        let Some(since) = self.since.get() else { return };
-        let left = FAILED_HOLD.saturating_sub(since.elapsed());
-        if left.is_zero() {
-            self.since.set(None);
-            window.remove_css_class("hg-failed");
-            return;
+        let step = self.state.borrow_mut().clear(Instant::now());
+        match step {
+            Clear::Nothing => {}
+            Clear::Now => window.remove_css_class("hg-failed"),
+            Clear::After(left, ticket) => {
+                let (me, weak) = (self.clone(), window.downgrade());
+                glib::timeout_add_local_once(left, move || {
+                    if me.state.borrow_mut().expire(ticket) {
+                        if let Some(window) = weak.upgrade() {
+                            window.remove_css_class("hg-failed");
+                        }
+                    }
+                });
+            }
         }
-        let (me, weak, ticket) = (self.clone(), window.downgrade(), self.ticket.get());
-        glib::timeout_add_local_once(left, move || {
-            if me.ticket.get() != ticket {
-                return;
-            }
-            me.since.set(None);
-            if let Some(window) = weak.upgrade() {
-                window.remove_css_class("hg-failed");
-            }
-        });
+    }
+}
+
+/// What [`Failed`] does, kept apart from GTK to be testable.
+#[derive(Default)]
+struct FailedState {
+    since: Option<Instant>,
+    /// Bumped by every failure: a timer or tick from before is stale.
+    ticket: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Clear {
+    Nothing,
+    Now,
+    /// When the hold is over, unless another failure came meanwhile.
+    After(Duration, u64),
+}
+
+impl FailedState {
+    fn fail(&mut self, now: Instant) -> u64 {
+        self.since = Some(now);
+        self.ticket += 1;
+        self.ticket
+    }
+
+    /// Whether the class may come back for `ticket`. Ticks wait for frames
+    /// and a window nobody presents gets none, so the hold can run out and
+    /// clear before the re-add of a repeated failure: that must not undo it.
+    fn current(&self, ticket: u64) -> bool {
+        self.ticket == ticket && self.since.is_some()
+    }
+
+    fn clear(&mut self, now: Instant) -> Clear {
+        let Some(since) = self.since else { return Clear::Nothing };
+        let left = FAILED_HOLD.saturating_sub(now.saturating_duration_since(since));
+        if !left.is_zero() {
+            return Clear::After(left, self.ticket);
+        }
+        self.since = None;
+        Clear::Now
+    }
+
+    /// A `Clear::After` came due; true if the class goes.
+    fn expire(&mut self, ticket: u64) -> bool {
+        if self.ticket != ticket {
+            return false;
+        }
+        self.since = None;
+        true
     }
 }
 
@@ -309,6 +350,63 @@ mod tests {
         assert_eq!(shown[..5], lines[..5]);
         assert_eq!(shown[5], "css: +2 more");
         assert_eq!(capped(lines[..5].to_vec(), 5), lines[..5]);
+    }
+
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    #[test]
+    fn a_failure_is_held_then_goes_with_the_next_clear() {
+        let (mut failed, t0) = (FailedState::default(), Instant::now());
+        let ticket = failed.fail(t0);
+        assert!(failed.current(ticket));
+        assert_eq!(failed.clear(t0 + ms(500)), Clear::After(ms(1000), ticket));
+        assert!(failed.current(ticket), "still held");
+        assert!(failed.expire(ticket));
+        assert!(!failed.current(ticket));
+        assert_eq!(failed.clear(t0 + ms(3000)), Clear::Nothing);
+    }
+
+    #[test]
+    fn a_failure_right_after_a_clear_comes_back() {
+        let (mut failed, t0) = (FailedState::default(), Instant::now());
+        let first = failed.fail(t0);
+        assert_eq!(failed.clear(t0 + FAILED_HOLD), Clear::Now);
+        assert!(!failed.current(first));
+        let second = failed.fail(t0 + FAILED_HOLD);
+        assert!(failed.current(second));
+        assert_eq!(failed.clear(t0 + FAILED_HOLD + ms(100)), Clear::After(ms(1400), second));
+    }
+
+    #[test]
+    fn a_re_add_held_up_by_missing_frames_does_not_undo_a_clear() {
+        let (mut failed, t0) = (FailedState::default(), Instant::now());
+        failed.fail(t0);
+        let repeated = failed.fail(t0 + ms(300));
+        let Clear::After(_, ticket) = failed.clear(t0 + ms(400)) else {
+            panic!("a clear inside the hold waits")
+        };
+        assert!(failed.expire(ticket));
+        assert!(!failed.current(repeated));
+        assert_eq!(failed.clear(t0 + ms(5000)), Clear::Nothing);
+
+        let mut failed = FailedState::default();
+        failed.fail(t0);
+        let repeated = failed.fail(t0 + ms(300));
+        assert_eq!(failed.clear(t0 + ms(3000)), Clear::Now);
+        assert!(!failed.current(repeated));
+    }
+
+    #[test]
+    fn a_hold_timer_from_before_the_next_failure_is_stale() {
+        let (mut failed, t0) = (FailedState::default(), Instant::now());
+        let first = failed.fail(t0);
+        assert_eq!(failed.clear(t0 + ms(200)), Clear::After(ms(1300), first));
+        let second = failed.fail(t0 + ms(800));
+        assert!(!failed.expire(first));
+        assert!(failed.current(second));
+        assert_eq!(failed.clear(t0 + ms(900)), Clear::After(ms(1400), second));
     }
 
     #[test]
