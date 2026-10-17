@@ -48,8 +48,7 @@ pub fn load_css(path: &Path) -> Vec<String> {
         let file = section.file().and_then(|file| file.basename());
         let at = section.start_location();
         let problem = css_problem(file.as_deref(), at.lines(), at.line_chars(), err);
-        // A warning (a deprecation) still renders; only errors reach the banner.
-        if err.kind::<gtk::CssParserWarning>().is_some() {
+        if !on_banner(err) {
             warn_!("css {problem}");
             return;
         }
@@ -78,6 +77,12 @@ pub fn load_css(path: &Path) -> Vec<String> {
         gtk::STYLE_PROVIDER_PRIORITY_USER,
     );
     problems
+}
+
+/// A deprecated construct still renders. Any other warning is a rule that
+/// never applies (an undefined `@media` feature), as good as an error.
+fn on_banner(err: &glib::Error) -> bool {
+    !matches!(err.kind::<gtk::CssParserWarning>(), Some(gtk::CssParserWarning::Deprecated))
 }
 
 /// `style.css:3:6: …` — GTK counts lines and columns from zero.
@@ -340,6 +345,19 @@ mod tests {
         let line = css_problem(Some(Path::new("style.css")), 2, 5, &"junk at end of value");
         assert_eq!(line, "style.css:3:6: junk at end of value");
         assert_eq!(css_problem(None, 0, 0, &"x"), "style:1:1: x");
+    }
+
+    #[test]
+    fn only_css_deprecations_stay_off_the_banner() {
+        let deprecated = glib::Error::new(gtk::CssParserWarning::Deprecated, "alpha() is old");
+        assert!(!on_banner(&deprecated));
+        for warning in [gtk::CssParserWarning::Syntax, gtk::CssParserWarning::Unimplemented] {
+            let err = glib::Error::new(warning, "Undefined @media feature 'min-width'");
+            assert!(on_banner(&err), "{warning:?}");
+        }
+        for error in [gtk::CssParserError::Syntax, gtk::CssParserError::UnknownValue] {
+            assert!(on_banner(&glib::Error::new(error, "No property named \"colour\"")));
+        }
     }
 
     #[test]

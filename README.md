@@ -196,7 +196,10 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
 Parse errors are skipped, never fatal: each is logged and shown in the banner
-as `style.css:3:6: …` (the first five; the rest are counted).
+as `style.css:3:6: …` (the first five; the rest are counted). So are GTK's
+warnings — an undefined `@media` feature leaves its block unused — except
+deprecations (`@define-color`, `alpha()`; GTK reports them only with
+`GTK_DEBUG=css`), which still work and are only logged.
 
 **Sizes relative to the screen.** GTK CSS has no `%`/`vw` units for sizes,
 so the greeter publishes the window's size as custom properties on
