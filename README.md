@@ -40,6 +40,11 @@ or inside a dedicated Hyprland config, run `hypred-greeter` from the
 compositor and tear the compositor down when it exits (greetd starts the
 chosen session only after the greeter command exits).
 
+Either way its log is in the journal: `journalctl -t hypred-greeter`. The
+greeter writes stderr, and when that is not the journal already — a
+compositor's `exec` hands it `/dev/null`, greetd a VT — it sends each line,
+GTK's warnings included, to journald itself (`--demo` writes stderr only).
+
 ## Configuration
 
 Everything lives in `/etc/greetd/hypred-greeter/` (override with

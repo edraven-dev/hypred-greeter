@@ -8,6 +8,8 @@ repository = "https://github.com/edraven-dev/hypred-greeter"
 
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_12"] }
+# The glib gtk4 builds on, named only to switch on log_writer_default_would_drop.
+glib = { version = "0.22", features = ["v2_68"] }
 greetd_ipc = { version = "0.10", features = ["sync-codec"] }
 serde = { version = "1", features = ["derive"] }
 toml = "1"
