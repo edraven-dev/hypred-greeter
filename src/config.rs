@@ -381,12 +381,12 @@ fn parse(text: &str) -> Result<(Config, Vec<String>), toml::de::Error> {
 }
 
 impl Loaded {
+    /// A path from the command line is used as given (a relative one from
+    /// the working directory); a `[paths]` value is relative to the config.
     pub fn resolve(&self, cli_override: Option<&Path>, configured: &Path) -> PathBuf {
-        let path = cli_override.unwrap_or(configured);
-        if path.is_absolute() {
-            path.into()
-        } else {
-            self.base_dir.join(path)
+        match cli_override {
+            Some(path) => path.into(),
+            None => self.base_dir.join(configured),
         }
     }
 }
@@ -582,6 +582,19 @@ mod tests {
     fn sessions_default_parses() {
         let (config, _) = parse("[sessions]\ndefault = \"wayland/hyprland-uwsm\"\n").unwrap();
         assert_eq!(config.sessions.default.as_deref(), Some("wayland/hyprland-uwsm"));
+    }
+
+    #[test]
+    fn cli_paths_are_taken_as_given_and_config_paths_follow_the_config() {
+        let loaded = load(Some(Path::new("/nonexistent/hypred-greeter/config.toml")));
+        let style = Path::new("style.css");
+        let resolve =
+            |cli: Option<&str>, configured: &Path| loaded.resolve(cli.map(Path::new), configured);
+        assert_eq!(resolve(None, style), Path::new("/nonexistent/hypred-greeter/style.css"));
+        assert_eq!(resolve(None, Path::new("/usr/share/x.css")), Path::new("/usr/share/x.css"));
+        assert_eq!(resolve(Some("./mytheme.css"), style), Path::new("./mytheme.css"));
+        assert_eq!(resolve(Some("themes/a/greeter.css"), style), Path::new("themes/a/greeter.css"));
+        assert_eq!(resolve(Some("/srv/theme.css"), style), Path::new("/srv/theme.css"));
     }
 
     #[test]

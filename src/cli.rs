@@ -4,8 +4,10 @@ const USAGE: &str = "\
 usage: hypred-greeter [options]
 
   --config <path>   main config file (default /etc/greetd/hypred-greeter/config.toml)
-  --layout <path>   layout TOML, overrides the config's [paths].layout
-  --style <path>    CSS file, overrides the config's [paths].style
+  --layout <path>   layout TOML instead of the config's [paths].layout
+  --style <path>    CSS file instead of the config's [paths].style
+                    (a relative --layout/--style is taken from the current
+                    directory, a relative [paths] value from the config's)
   --demo            windowed demo mode: fake auth; power/button commands are
                     announced, not run (label commands do run)
   --version         print version and exit

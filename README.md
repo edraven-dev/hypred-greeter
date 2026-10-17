@@ -45,7 +45,8 @@ chosen session only after the greeter command exits).
 Everything lives in `/etc/greetd/hypred-greeter/` (override with
 `--config`): `config.toml`, `layout.toml`, `style.css`. All three ship
 documented defaults. Relative paths in `[paths]` resolve against the config
-directory; `--layout` and `--style` override for quick iteration:
+directory; `--layout` and `--style` override them for quick iteration, a
+relative one from the current directory:
 
 ```sh
 hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
