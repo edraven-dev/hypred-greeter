@@ -238,9 +238,6 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
     }
 }
 
-/// `.hg-failed` goes before it can come back (consecutive failures always
-/// have a re-arm, a new submission or pam_fprintd's next "Place your
-/// finger" in between), so a CSS animation on it restarts on every failure.
 fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
     match event {
         UiEvent::Busy(true) => vec![("hg-busy", true), ("hg-failed", false)],
