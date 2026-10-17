@@ -163,8 +163,12 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 within the space the widget gets), `justify` (`left`/`center`/`right`/`fill`,
 for wrapped lines), `ellipsize` (`none`/`start`/`middle`/`end`), `lines` (with
 `ellipsize`: at most that many lines), `markup` (the text is Pango markup:
-`format = "<b>%H</b>:%M"`; a text with a bare `&` or `<` fails to parse and
-is skipped, so leave it off `message`, which shows PAM's texts).
+`format = "<b>%H</b>:%M"`, `&amp;` for a literal `&`; what a placeholder or
+a strftime conversion puts in is escaped, so `{time:%d & %m}` needs no
+`&amp;`. A label's `text` or a clock's `format` that is not valid markup is
+rejected: a ⚠ placeholder and a banner line. PAM's texts reach `message`
+later, and one that is not valid markup is not shown (the label keeps what
+it had), so leave `markup` off `message`).
 
 ### style.css — every selector you need
 

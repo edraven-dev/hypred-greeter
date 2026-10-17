@@ -136,6 +136,12 @@ impl Template {
         }
         out
     }
+
+    /// What GTK will parse: the layout's text with each placeholder's
+    /// value escaped in, so a `{time:%d & %m}` is no markup error.
+    fn check_markup(&self) -> Result<(), glib::Error> {
+        gtk::pango::parse_markup(&self.render(|_| "x".into(), true, false), '\0').map(drop)
+    }
 }
 
 struct Live {
@@ -277,7 +283,7 @@ impl WidgetDef for LabelDef {
         }
         apply_text_props(&label, node)?;
         if label.uses_markup() {
-            if let Err(err) = gtk::pango::parse_markup(&text, '\0') {
+            if let Err(err) = template.check_markup() {
                 return Err(WidgetError::Other(format!("`text` is not valid Pango markup: {err}")));
             }
         }
@@ -391,6 +397,17 @@ mod tests {
         assert_eq!(Template::parse_lenient("{{{user}}}").render(fixed, false, true), "{{alice}}");
         let escaped = Template::parse_lenient("{{a}} & {user}").render(fixed, true, true);
         assert_eq!(escaped, "{{a}} &amp; alice");
+    }
+
+    #[test]
+    fn the_markup_check_sees_the_values_escaped_in() {
+        let ok = ["B: {time:%d & %m}", "E: {time:%H<%M}", "<b>{user}</b> on {hostname} {{x}}"];
+        for text in ok {
+            assert!(Template::parse(text).unwrap().check_markup().is_ok(), "{text}");
+        }
+        for text in ["Tom & Jerry", "<b>{user}", "{user} < 3"] {
+            assert!(Template::parse(text).unwrap().check_markup().is_err(), "{text}");
+        }
     }
 
     #[test]
