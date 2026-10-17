@@ -2,6 +2,7 @@
 //! failure, 101 panic. greetd starts the chosen session only after this
 //! process exits, so it must always exit.
 
+mod actions;
 mod auth;
 mod backend;
 mod cli;
