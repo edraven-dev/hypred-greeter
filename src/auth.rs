@@ -15,9 +15,15 @@
 //! session, and `rearm-window = "always"` keeps it that way for as long as
 //! the greeter is up — and on screen: a greeter on a VT nobody looks at
 //! arms nothing, the reader belongs to the VT in front of the user.
+//!
+//! pam_fprintd's max-tries holds per conversation only and faillock never
+//! sees a scan, so re-arming alone would make fingerprint tries unlimited:
+//! past `fingerprint-misses` the greeter opens nothing on its own and
+//! refuses a login no password was typed for until the lockout ends.
 
 use gtk4::glib;
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
@@ -25,7 +31,7 @@ use greetd_ipc::{AuthMessageType, Request, Response};
 
 use crate::backend::{Backend, BackendError};
 use crate::config::{self, Rearm, TextKind};
-use crate::log::{error, info};
+use crate::log::{error, info, warn_};
 use crate::ui::bus::{Bus, FocusTarget, UiEvent};
 
 /// A park sooner than this after CreateSession means no cycle ran.
@@ -68,6 +74,8 @@ enum Phase {
         passive: bool,
         saw_info: bool,
         started: Instant,
+        asked_secret: bool,
+        answered_secret: bool,
     },
     Starting,
 }
@@ -101,6 +109,14 @@ pub struct Auth {
     typing_hold: Cell<Duration>,
     seat_poll: Cell<Duration>,
     seat_waiting: Cell<bool>,
+    miss_cap: u32,
+    miss_text: String,
+    /// Zero: misses are never forgotten and a lock lasts for good.
+    lockout: Cell<Duration>,
+    misses: RefCell<VecDeque<Instant>>,
+    locked: Cell<bool>,
+    /// The locked text is the last thing shown, as far as auth can tell.
+    lock_shown: Cell<bool>,
     hooks: Hooks,
 }
 
@@ -146,6 +162,12 @@ impl Auth {
             typing_hold: Cell::new(Duration::from_secs(options.typing_hold)),
             seat_poll: Cell::new(SEAT_POLL),
             seat_waiting: Cell::new(false),
+            miss_cap: options.fingerprint_misses,
+            miss_text: options.fingerprint_miss_text.clone(),
+            lockout: Cell::new(Duration::from_secs(options.fingerprint_lockout)),
+            misses: RefCell::default(),
+            locked: Cell::new(false),
+            lock_shown: Cell::new(false),
             hooks,
         });
 
@@ -188,10 +210,23 @@ impl Auth {
             UiEvent::Busy(_)
             | UiEvent::SessionChanged(_)
             | UiEvent::Armed(_)
+            | UiEvent::FingerprintLocked(_)
             | UiEvent::Starting
             | UiEvent::Focus(_)
             | UiEvent::UsernameChanged(_) => event,
         };
+        // The message widget keeps its text over a passive secret prompt
+        // (unless its secret-prompts says otherwise).
+        if matches!(
+            event,
+            UiEvent::Info(_)
+                | UiEvent::PamError(_)
+                | UiEvent::AuthError(_)
+                | UiEvent::Prompt { passive: false, .. }
+                | UiEvent::Prompt { secret: false, .. }
+        ) {
+            self.lock_shown.set(false);
+        }
         self.bus.emit(&event);
     }
 
@@ -219,6 +254,10 @@ impl Auth {
         self.drop_conversation();
         if username.is_empty() {
             return;
+        }
+        if self.locked.get() {
+            self.pending_rearm.set(true);
+            return self.remind_locked();
         }
         if (self.hooks.seat_active)() {
             self.open(username.to_string(), None, true);
@@ -296,10 +335,11 @@ impl Auth {
     /// Armed: a passive conversation waits on the module with nothing
     /// submitted — a touch alone would log in. Told once per change.
     fn sync_armed(&self) {
-        let armed = matches!(
-            *self.phase.borrow(),
-            Phase::Conversing { passive: true, awaiting_input: false, .. }
-        );
+        let armed = !self.locked.get()
+            && matches!(
+                *self.phase.borrow(),
+                Phase::Conversing { passive: true, awaiting_input: false, .. }
+            );
         if self.armed.replace(armed) != armed {
             self.bus.emit(&UiEvent::Armed(armed));
         }
@@ -308,9 +348,12 @@ impl Auth {
     pub fn respond(&self, response: Option<String>) {
         let mut phase = self.phase.borrow_mut();
         match &mut *phase {
-            Phase::Conversing { awaiting_input, passive, .. } if *awaiting_input => {
+            Phase::Conversing {
+                awaiting_input, passive, asked_secret, answered_secret, ..
+            } if *awaiting_input => {
                 *awaiting_input = false;
                 *passive = false;
+                *answered_secret |= *asked_secret;
                 drop(phase);
                 self.emit(UiEvent::Busy(true));
                 self.send(Request::PostAuthMessageResponse { response });
@@ -433,6 +476,7 @@ impl Auth {
     fn schedule_retry(&self, failed: bool) {
         let ended = self.quick_ends.get();
         if !self.eager
+            || self.locked.get()
             || self.rearm == Rearm::Never
             || (self.rearm != Rearm::Always && ended >= RETRY_LIMIT)
         {
@@ -491,7 +535,7 @@ impl Auth {
 
     fn restart(&self) {
         let user = match &*self.phase.borrow() {
-            Phase::Conversing { user, .. } => user.clone(),
+            Phase::Conversing { user, .. } if !self.locked.get() => user.clone(),
             _ => return,
         };
         self.abandon_conversation();
@@ -525,6 +569,8 @@ impl Auth {
             passive,
             saw_info: false,
             started: Instant::now(),
+            asked_secret: false,
+            answered_secret: false,
         };
         self.sync_armed();
         self.send(Request::CreateSession { username: user });
@@ -590,7 +636,10 @@ impl Auth {
         match kind {
             AuthMessageType::Secret => {
                 let stashed = match &mut *self.phase.borrow_mut() {
-                    Phase::Conversing { stash, .. } => stash.take(),
+                    Phase::Conversing { stash, answered_secret, .. } => {
+                        *answered_secret |= stash.is_some();
+                        stash.take()
+                    }
                     _ => None,
                 };
                 match stashed {
@@ -611,7 +660,12 @@ impl Auth {
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
             AuthMessageType::Error => {
+                // Before the rewrite rules: they may change the very text.
+                let missed = !self.miss_text.is_empty() && text.contains(&self.miss_text);
                 self.emit(UiEvent::PamError(text));
+                if missed {
+                    self.count_miss();
+                }
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
         }
@@ -619,8 +673,9 @@ impl Auth {
 
     fn await_input(&self, secret: bool, text: String) {
         let passive = match &mut *self.phase.borrow_mut() {
-            Phase::Conversing { awaiting_input, passive, .. } => {
+            Phase::Conversing { awaiting_input, passive, asked_secret, .. } => {
                 *awaiting_input = true;
+                *asked_secret = secret;
                 *passive
             }
             _ => false,
@@ -628,8 +683,80 @@ impl Auth {
         self.sync_armed();
         self.emit(UiEvent::Busy(false));
         self.emit(UiEvent::Prompt { secret, text, passive });
-        if passive {
+        if passive && self.locked.get() {
+            self.remind_locked();
+        } else if passive {
             self.maybe_rearm();
+        }
+    }
+
+    /// Misses older than the lockout are forgotten.
+    fn count_miss(&self) {
+        if self.miss_cap == 0 || self.locked.get() {
+            return;
+        }
+        let (now, lockout) = (Instant::now(), self.lockout.get());
+        let count = {
+            let mut misses = self.misses.borrow_mut();
+            if !lockout.is_zero() {
+                misses.retain(|at| now.duration_since(*at) < lockout);
+            }
+            misses.push_back(now);
+            misses.len()
+        };
+        info!("fingerprint did not match ({count} of {})", self.miss_cap);
+        if count >= self.miss_cap as usize {
+            self.lock();
+        }
+    }
+
+    fn lock(&self) {
+        self.locked.set(true);
+        let lockout = self.lockout.get();
+        if lockout.is_zero() {
+            warn_!("fingerprint locked out until the greeter restarts");
+        } else {
+            warn_!("fingerprint locked out for {} s", lockout.as_secs());
+            let me = self.me.clone();
+            glib::spawn_future_local(async move {
+                glib::timeout_future(lockout).await;
+                if let Some(auth) = me.upgrade() {
+                    auth.unlock();
+                }
+            });
+        }
+        self.emit(UiEvent::FingerprintLocked(true));
+        self.sync_armed();
+        self.say_locked();
+    }
+
+    fn unlock(&self) {
+        self.locked.set(false);
+        self.misses.borrow_mut().clear();
+        info!("fingerprint lockout over");
+        self.emit(UiEvent::FingerprintLocked(false));
+        if self.lock_shown.get() {
+            self.emit(UiEvent::Info(String::new()));
+        }
+        self.sync_armed();
+        if !self.eager {
+            return;
+        }
+        if self.parked_for_shown_user() {
+            self.maybe_rearm();
+        } else if self.pending_rearm.get() && self.rearm != Rearm::Never {
+            self.resume();
+        }
+    }
+
+    fn say_locked(&self) {
+        self.emit(UiEvent::PamError(self.texts.fingerprint_locked.clone()));
+        self.lock_shown.set(true);
+    }
+
+    fn remind_locked(&self) {
+        if !self.lock_shown.get() {
+            self.say_locked();
         }
     }
 
@@ -637,7 +764,7 @@ impl Auth {
         let phase = std::mem::replace(&mut *self.phase.borrow_mut(), Phase::Idle);
         self.sync_armed();
         match phase {
-            Phase::Conversing { user, passive, .. } => {
+            Phase::Conversing { user, passive, stash, answered_secret, .. } => {
                 let shown = (self.hooks.current_username)();
                 if user != shown {
                     // Authenticated while the username was being edited:
@@ -660,8 +787,23 @@ impl Auth {
                     self.pending_rearm.set(true);
                     return self.wait_for_seat();
                 }
+                if self.locked.get() && !answered_secret {
+                    warn_!("fingerprint locked out: refused a login no password was typed for");
+                    self.abandon_conversation();
+                    if stash.is_none() && !passive {
+                        self.emit(UiEvent::Busy(false));
+                    }
+                    self.say_locked();
+                    match stash {
+                        // Never asked for in this one: a new conversation takes it.
+                        Some(password) => self.open(user, Some(password), false),
+                        None => self.pending_rearm.set(self.eager),
+                    }
+                    return;
+                }
                 let (cmd, env) = (self.hooks.resolve_start)(&user);
-                info!("authenticated; starting session: {}", cmd.join(" "));
+                let how = if answered_secret { "a password" } else { "no password (fingerprint)" };
+                info!("authenticated with {how}; starting session: {}", cmd.join(" "));
                 *self.phase.borrow_mut() = Phase::Starting;
                 self.emit(UiEvent::Busy(true));
                 self.emit(UiEvent::Starting);
@@ -698,6 +840,11 @@ impl Auth {
     fn set_pauses(&self, typing_hold: Duration, seat_poll: Duration) {
         self.typing_hold.set(typing_hold);
         self.seat_poll.set(seat_poll);
+    }
+
+    #[cfg(test)]
+    fn set_lockout(&self, lockout: Duration) {
+        self.lockout.set(lockout);
     }
 
     /// Input that reaches nothing but the activity clock.
@@ -783,6 +930,7 @@ mod tests {
                     UiEvent::Busy(busy) => format!("busy {busy}"),
                     UiEvent::SessionChanged(index) => format!("session {index}"),
                     UiEvent::Armed(armed) => format!("armed {armed}"),
+                    UiEvent::FingerprintLocked(locked) => format!("locked {locked}"),
                     UiEvent::Starting => "starting".into(),
                     UiEvent::Focus(target) => format!("focus {target:?}"),
                     UiEvent::UsernameChanged(name) => format!("username {name}"),
@@ -1825,7 +1973,7 @@ mod tests {
     #[test]
     fn no_match_errors_are_acked_and_max_tries_rearms_at_once() {
         let (backend, seen, _) = scripted(three_no_matches);
-        let log = drive_with(backend, eager_always(), |auth, pump| {
+        let log = drive_with(backend, capped(0), |auth, pump| {
             auth.start_eager("edraven");
             auth.backdate(Duration::from_secs(2));
             pump();
@@ -1839,6 +1987,380 @@ mod tests {
         // Still armed through the no-matches: the reader is waiting again.
         let first_park = log.iter().position(|e| e.starts_with("prompt")).unwrap();
         assert_eq!(log[..first_park].iter().filter(|e| *e == "armed false").count(), 1, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+    }
+
+    fn capped(misses: u32) -> config::Auth {
+        config::Auth { fingerprint_misses: misses, ..eager_always() }
+    }
+
+    const LOCKED: &str = "pamerror too many fingerprint attempts — use your password";
+
+    fn count(log: &[String], entry: &str) -> usize {
+        log.iter().filter(|e| *e == entry).count()
+    }
+
+    #[test]
+    fn the_default_cap_locks_in_the_second_max_tries_conversation() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            pump();
+        });
+        let mut cycle = vec!["create edraven"];
+        cycle.extend(std::iter::repeat_n("respond None", 6));
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(requests(&seen), expected);
+        let misses: Vec<usize> =
+            (0..log.len()).filter(|&i| log[i] == "pamerror Failed to match fingerprint").collect();
+        assert_eq!(misses.len(), 6, "{log:?}");
+        assert_eq!(log[misses[4] + 1], "locked true", "{log:?}");
+        assert_eq!(count(&log, "locked true"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn reaching_the_cap_locks_disarms_and_keeps_the_park() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            pump();
+        });
+        let mut parked = vec!["create edraven"];
+        parked.extend(std::iter::repeat_n("respond None", 6));
+        assert_eq!(requests(&seen), parked);
+        let expected = [
+            "armed true",
+            "info Place your finger",
+            "pamerror Failed to match fingerprint",
+            "info Place your finger",
+            "pamerror Failed to match fingerprint",
+            "locked true",
+            "armed false",
+            LOCKED,
+            "info Place your finger",
+            "pamerror Failed to match fingerprint",
+            "busy false",
+            "prompt[true,passive] Password:",
+            LOCKED,
+        ];
+        assert_eq!(log, expected);
+    }
+
+    #[test]
+    fn only_pam_fprintds_no_match_counts_and_before_the_rewrite() {
+        fn scans(_: &str) -> Vec<Step> {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(
+                    AuthMessageType::Error,
+                    "Your finger was not centered, try swiping your finger again",
+                ),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Place your finger on the reader again"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(Info, "Verification timed out"),
+                Step::Msg(AuthMessageType::Error, "An unknown error occurred"),
+                Step::Msg(Secret, "Password:"),
+            ]
+        }
+        let one_conversation = |cap| {
+            let (backend, seen, _) = scripted(scans);
+            let log = drive_with(backend, capped(cap), |auth, pump| {
+                auth.start_eager("edraven");
+                pump();
+            });
+            assert_eq!(creates(&seen), 1, "{:?}", requests(&seen));
+            log
+        };
+        let log = one_conversation(1);
+        let locked = log.iter().position(|e| e == "locked true").expect("locked");
+        assert_eq!(log[locked - 1], "pamerror Failed to match fingerprint", "{log:?}");
+        let log = one_conversation(2);
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+
+        let texts = rules("[[rewrite]]\nmatch = \"Failed to match\"\ntext = \"Not you\"\n");
+        let (backend, _, _) = scripted(three_no_matches);
+        let log = drive_texts(backend, capped(1), texts, |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        let locked = log.iter().position(|e| e == "locked true").expect("locked");
+        assert_eq!(log[locked - 1], "pamerror Not you", "{log:?}");
+    }
+
+    #[test]
+    fn while_locked_neither_timer_nor_input_nor_a_name_opens_anything() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+            auth.note_activity();
+            pump();
+            auth.submit("fail".into());
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Fresh);
+            assert_eq!(auth.quick_ends.get(), 0, "no retry timer while locked");
+            auth.note_activity();
+            show("bob");
+            auth.start_eager("bob");
+            show("edraven");
+            auth.start_eager("edraven");
+            pump();
+            pump();
+        });
+        let mut expected = vec!["create edraven"];
+        expected.extend(std::iter::repeat_n("respond None", 6));
+        expected.extend(["respond Some(\"fail\")", "cancel"]);
+        assert_eq!(requests(&seen), expected);
+        let last = ["autherror wrong password".to_string(), LOCKED.to_string()];
+        assert!(log.ends_with(&last), "{log:?}");
+        assert_eq!(count(&log, "armed true"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn a_parked_prompt_still_takes_a_password_while_locked() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            pump();
+        });
+        let requests = requests(&seen);
+        assert_eq!(requests[requests.len() - 2..], ["respond Some(\"pw\")", "start true"]);
+        assert_eq!(creates(&seen), 1);
+        assert!(log.contains(&"locked true".to_string()), "{log:?}");
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    /// A no-match, then a touch that matches.
+    fn miss_then_touch(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Wait,
+        ]
+    }
+
+    #[test]
+    fn a_login_without_a_password_is_refused_while_locked() {
+        let (backend, seen, gate) = scripted(miss_then_touch);
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Fresh);
+            auth.note_activity();
+            pump();
+        });
+        let expected = ["create edraven", "respond None", "respond None", "respond None", "cancel"];
+        assert_eq!(requests(&seen), expected);
+        assert_eq!(count(&log, LOCKED), 2, "{log:?}");
+        assert!(!log.iter().any(|e| e == "starting" || e.contains("would start")), "{log:?}");
+    }
+
+    static TYPED_DURING_A_TOUCH: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_password_typed_during_a_refused_touch_is_sent_again() {
+        TYPED_DURING_A_TOUCH.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(|user| {
+            if TYPED_DURING_A_TOUCH.fetch_add(1, Ordering::SeqCst) == 0 {
+                miss_then_touch(user)
+            } else {
+                password_only(user)
+            }
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            gate.release();
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond None",
+            "cancel",
+            "create edraven",
+            "respond Some(\"pw\")",
+            "start true",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert_eq!(count(&log, LOCKED), 2, "{log:?}");
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+        assert_eq!(count(&log, "busy false"), 1, "{log:?}");
+    }
+
+    static TYPED_AFTER_A_TOUCH: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_password_typed_while_locked_opens_a_conversation_and_logs_in() {
+        TYPED_AFTER_A_TOUCH.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(|user| {
+            if TYPED_AFTER_A_TOUCH.fetch_add(1, Ordering::SeqCst) == 0 {
+                miss_then_touch(user)
+            } else {
+                fprint(user)
+            }
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            pump();
+            auth.submit("pw".into());
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond None",
+            "cancel",
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond Some(\"pw\")",
+            "start true",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn the_lockout_ends_and_the_park_rearms() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_lockout(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            assert_eq!(creates(&seen), 1);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+        });
+        let unlocked = log.iter().position(|e| e == "locked false").expect("unlocked");
+        assert_eq!(log[unlocked + 1], "info ", "{log:?}");
+        assert_eq!(requests(&seen)[7], "cancel");
+    }
+
+    static ENDED_BEFORE_THE_UNLOCK: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn the_lockout_ends_and_an_ended_conversation_reopens() {
+        ENDED_BEFORE_THE_UNLOCK.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(|user| {
+            if ENDED_BEFORE_THE_UNLOCK.fetch_add(1, Ordering::SeqCst) == 0 {
+                miss_then_touch(user)
+            } else {
+                password_only(user)
+            }
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_lockout(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond None",
+            "cancel",
+            "create edraven",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.ends_with(&["prompt[true,passive] Password:".to_string()]), "{log:?}");
+    }
+
+    #[test]
+    fn a_lockout_of_zero_lasts_and_never_forgets() {
+        let (backend, seen, gate) = scripted(|_| {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Wait,
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ]
+        });
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_lockout(Duration::ZERO);
+            auth.start_eager("edraven");
+            pump();
+            let first = Instant::now();
+            while first.elapsed() < Duration::from_millis(400) {
+                pump();
+            }
+            gate.release();
+            let locked = Instant::now();
+            while locked.elapsed() < Duration::from_millis(400) {
+                pump();
+            }
+            auth.note_activity();
+            pump();
+        });
+        assert_eq!(count(&log, "locked true"), 1, "{log:?}");
+        assert!(!log.contains(&"locked false".to_string()), "{log:?}");
+        assert_eq!(creates(&seen), 1, "{:?}", requests(&seen));
+    }
+
+    #[test]
+    fn misses_older_than_the_lockout_are_forgotten() {
+        let (backend, seen, gate) = scripted(|_| {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Wait,
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ]
+        });
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_lockout(Duration::from_millis(200));
+            auth.start_eager("edraven");
+            pump();
+            let first = Instant::now();
+            while first.elapsed() < Duration::from_millis(300) {
+                pump();
+            }
+            gate.release();
+            pump();
+        });
+        assert_eq!(count(&log, "pamerror Failed to match fingerprint"), 2, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+        assert_eq!(creates(&seen), 1, "{:?}", requests(&seen));
+    }
+
+    #[test]
+    fn without_a_cap_misses_never_lock() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(0), |auth, pump| {
+            auth.set_retry(FAST, FAST * 2);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
+        });
+        assert!(count(&log, "pamerror Failed to match fingerprint") >= 9, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
     }
 
     #[test]

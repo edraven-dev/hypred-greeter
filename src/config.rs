@@ -85,6 +85,10 @@ pub struct Auth {
     /// How long the username entry has to settle before an eager
     /// conversation opens for the name typed.
     pub username_debounce_ms: u64,
+    pub fingerprint_misses: u32,
+    pub fingerprint_lockout: u64,
+    /// pam_fprintd's texts follow the locale of greetd's PAM worker.
+    pub fingerprint_miss_text: String,
 }
 
 impl Default for Auth {
@@ -95,6 +99,19 @@ impl Default for Auth {
             user: None,
             typing_hold: 30,
             username_debounce_ms: 400,
+            fingerprint_misses: 5,
+            fingerprint_lockout: 600,
+            fingerprint_miss_text: "Failed to match fingerprint".into(),
+        }
+    }
+}
+
+impl Auth {
+    fn problems(&self) -> Vec<String> {
+        if self.fingerprint_misses > 0 && self.fingerprint_miss_text.is_empty() {
+            vec!["auth.fingerprint-miss-text is empty: no fingerprint miss is counted".into()]
+        } else {
+            Vec::new()
         }
     }
 }
@@ -215,6 +232,7 @@ pub struct Texts {
     pub auth_failed: String,
     /// `{program}` and `{error}` are filled in.
     pub power_failed: String,
+    pub fingerprint_locked: String,
     pub rewrite: Vec<Rewrite>,
 }
 
@@ -225,6 +243,7 @@ impl Default for Texts {
             username_changed: "username changed — enter the password again".into(),
             auth_failed: "authentication failed".into(),
             power_failed: "{program}: {error}".into(),
+            fingerprint_locked: "too many fingerprint attempts — use your password".into(),
             rewrite: vec![],
         }
     }
@@ -360,6 +379,9 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
             );
             problems.extend(
                 config.texts.problems().iter().map(|p| format!("config {}: {p}", path.display())),
+            );
+            problems.extend(
+                config.auth.problems().iter().map(|p| format!("config {}: {p}", path.display())),
             );
             config
         }
@@ -558,6 +580,47 @@ mod tests {
         assert_eq!(config.auth.typing_hold, 5);
         assert_eq!(config.auth.username_debounce_ms, 0);
         assert!(parse("[auth]\ntyping-hold = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_fingerprint_cap_defaults_and_parses() {
+        let config = parse("").unwrap().0;
+        assert_eq!(config.auth.fingerprint_misses, 5);
+        assert_eq!(config.auth.fingerprint_lockout, 600);
+        assert_eq!(config.auth.fingerprint_miss_text, "Failed to match fingerprint");
+        let locked = "too many fingerprint attempts — use your password";
+        assert_eq!(config.texts.fingerprint_locked, locked);
+        let text = "[auth]\nfingerprint-misses = 0\nfingerprint-lockout = 30\n\
+                    fingerprint-miss-text = \"Échec de la correspondance\"\n\
+                    [texts]\nfingerprint-locked = \"nope\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(config.auth.fingerprint_misses, 0);
+        assert_eq!(config.auth.fingerprint_lockout, 30);
+        assert_eq!(config.auth.fingerprint_miss_text, "Échec de la correspondance");
+        assert_eq!(config.texts.fingerprint_locked, "nope");
+        assert!(parse("[auth]\nfingerprint-misses = -1\n").is_err());
+        assert!(parse("[auth]\nfingerprint-lockout = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_shipped_config_documents_the_fingerprint_cap_defaults() {
+        let (config, unknown) = parse(include_str!("../data/config.toml")).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let (shipped, default) = (config.auth, Auth::default());
+        assert_eq!(shipped.fingerprint_misses, default.fingerprint_misses);
+        assert_eq!(shipped.fingerprint_lockout, default.fingerprint_lockout);
+        assert_eq!(shipped.fingerprint_miss_text, default.fingerprint_miss_text);
+        assert_eq!(config.texts.fingerprint_locked, Texts::default().fingerprint_locked);
+    }
+
+    #[test]
+    fn an_empty_miss_text_is_a_problem_unless_the_cap_is_off() {
+        let auth = parse("[auth]\nfingerprint-miss-text = \"\"\n").unwrap().0.auth;
+        assert_eq!(auth.problems().len(), 1, "{:?}", auth.problems());
+        let text = "[auth]\nfingerprint-misses = 0\nfingerprint-miss-text = \"\"\n";
+        assert!(parse(text).unwrap().0.auth.problems().is_empty());
+        assert!(Auth::default().problems().is_empty());
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub enum UiEvent {
     SessionChanged(usize),
     /// A passive (eager) conversation is open and nothing was submitted.
     Armed(bool),
+    /// Too many fingerprint misses: the greeter stops arming the reader and
+    /// refuses a login no password was typed for.
+    FingerprintLocked(bool),
     /// The session is being started (after auth success).
     Starting,
     Focus(FocusTarget),

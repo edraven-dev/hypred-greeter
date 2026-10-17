@@ -106,6 +106,7 @@ impl WidgetDef for PasswordDef {
                 | UiEvent::PamError(_)
                 | UiEvent::SessionChanged(_)
                 | UiEvent::Armed(_)
+                | UiEvent::FingerprintLocked(_)
                 | UiEvent::Starting
                 | UiEvent::UsernameChanged(_) => {}
             }

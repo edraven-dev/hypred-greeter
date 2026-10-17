@@ -207,6 +207,7 @@ fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
         UiEvent::Armed(true) => vec![("hg-armed", true), ("hg-failed", false)],
         UiEvent::Armed(false) => vec![("hg-armed", false)],
         UiEvent::Starting => vec![("hg-starting", true)],
+        UiEvent::FingerprintLocked(locked) => vec![("hg-fingerprint-locked", *locked)],
         UiEvent::SessionChanged(_) | UiEvent::Focus(_) | UiEvent::UsernameChanged(_) => Vec::new(),
     }
 }

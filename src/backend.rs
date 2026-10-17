@@ -48,12 +48,17 @@ impl Backend for GreetdBackend {
 /// Accepts any password except "fail"; username "mfa" walks the
 /// visible-prompt + info path, "fprint" a fingerprint cycle whose first
 /// info ack blocks like greetd does while pam_fprintd waits and then times
-/// out, "touch" the same cycle ending in a match. Never starts anything.
+/// out, "touch" the same cycle ending in a match, "nomatch" three scans
+/// that fail to match. Never starts anything.
 pub struct DemoBackend {
-    script: Vec<(AuthMessageType, String)>,
+    /// Popped back-to-front; `true`: the ack of that message blocks for
+    /// the fingerprint wait.
+    script: Vec<(AuthMessageType, &'static str, bool)>,
     fingerprint_wait: Duration,
     wait_on_ack: bool,
 }
+
+const PLACE: &str = "Place your right thumb on the fingerprint reader";
 
 impl DemoBackend {
     pub fn new() -> Self {
@@ -67,8 +72,9 @@ impl DemoBackend {
 
     fn next(&mut self) -> Response {
         match self.script.pop() {
-            Some((auth_message_type, auth_message)) => {
-                Response::AuthMessage { auth_message_type, auth_message }
+            Some((auth_message_type, auth_message, wait)) => {
+                self.wait_on_ack = wait;
+                Response::AuthMessage { auth_message_type, auth_message: auth_message.into() }
             }
             None => Response::Success,
         }
@@ -77,30 +83,34 @@ impl DemoBackend {
 
 impl Backend for DemoBackend {
     fn roundtrip(&mut self, request: Request) -> Result<Response, BackendError> {
+        use AuthMessageType::{Error, Info, Secret, Visible};
+        const MISS: (AuthMessageType, &str, bool) = (Error, "Failed to match fingerprint", false);
         Ok(match request {
             Request::CreateSession { username } => {
                 // Popped back-to-front.
                 self.script = match username.as_str() {
                     "mfa" => vec![
-                        (AuthMessageType::Info, "demo: any token accepted".into()),
-                        (AuthMessageType::Visible, "Token:".into()),
-                        (AuthMessageType::Secret, "Password:".into()),
+                        (Info, "demo: any token accepted", false),
+                        (Visible, "Token:", false),
+                        (Secret, "Password:", false),
                     ],
                     "fprint" => vec![
-                        (AuthMessageType::Secret, "Password:".into()),
-                        (AuthMessageType::Info, "Verification timed out".into()),
-                        (
-                            AuthMessageType::Info,
-                            "Place your right thumb on the fingerprint reader".into(),
-                        ),
+                        (Secret, "Password:", false),
+                        (Info, "Verification timed out", false),
+                        (Info, PLACE, true),
                     ],
-                    "touch" => vec![(
-                        AuthMessageType::Info,
-                        "Place your right thumb on the fingerprint reader".into(),
-                    )],
-                    _ => vec![(AuthMessageType::Secret, "Password:".into())],
+                    "touch" => vec![(Info, PLACE, true)],
+                    "nomatch" => vec![
+                        (Secret, "Password:", false),
+                        MISS,
+                        (Info, PLACE, true),
+                        MISS,
+                        (Info, PLACE, true),
+                        MISS,
+                        (Info, PLACE, true),
+                    ],
+                    _ => vec![(Secret, "Password:", false)],
                 };
-                self.wait_on_ack = matches!(username.as_str(), "fprint" | "touch");
                 self.next()
             }
             Request::PostAuthMessageResponse { response } => {
@@ -334,6 +344,26 @@ mod tests {
         drop(backend);
         server.join().unwrap();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_demo_nomatch_user_misses_three_scans_then_asks_for_the_password() {
+        let mut demo = DemoBackend::with_fingerprint_wait(Duration::from_millis(1));
+        let mut said = Vec::new();
+        let mut response = demo.roundtrip(Request::CreateSession { username: "nomatch".into() });
+        while let Ok(Response::AuthMessage { auth_message_type, auth_message }) = response {
+            said.push(format!("{auth_message_type:?} {auth_message}"));
+            if matches!(auth_message_type, AuthMessageType::Secret) {
+                break;
+            }
+            response = demo.roundtrip(Request::PostAuthMessageResponse { response: None });
+        }
+        let scan = ["Info Place your right thumb on the fingerprint reader".to_string()];
+        let miss = ["Error Failed to match fingerprint".to_string()];
+        let expected = [&scan[..], &miss, &scan, &miss, &scan, &miss, &["Secret Password:".into()]];
+        assert_eq!(said, expected.concat());
+        let done = demo.roundtrip(Request::PostAuthMessageResponse { response: Some("pw".into()) });
+        assert!(matches!(done, Ok(Response::Success)));
     }
 
     #[test]
