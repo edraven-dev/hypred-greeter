@@ -81,6 +81,7 @@ pub struct Auth {
     pub rearm_window: Rearm,
     /// The username shown when nothing is remembered.
     pub user: Option<String>,
+    pub fixed_user: bool,
     /// Seconds text left in the password entry keeps a parked prompt ready
     /// after the last input — a stray key must not switch the reader off.
     pub typing_hold: u64,
@@ -95,9 +96,20 @@ impl Default for Auth {
             eager: false,
             rearm_window: Rearm::Never,
             user: None,
+            fixed_user: false,
             typing_hold: 30,
             username_debounce_ms: 400,
         }
+    }
+}
+
+impl Auth {
+    fn problems(&mut self) -> Vec<String> {
+        if self.fixed_user && self.user.as_deref().is_none_or(str::is_empty) {
+            self.fixed_user = false;
+            return vec!["`auth.fixed-user` pins `auth.user`, which is not set; ignored".into()];
+        }
+        Vec::new()
     }
 }
 
@@ -354,15 +366,14 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
     };
 
     let config = match parse(&text) {
-        Ok((config, unknown)) => {
+        Ok((mut config, unknown)) => {
             // A misspelt key silently leaves its default in force
             // (`rearm_window` would switch re-arming off): say so on screen.
             problems.extend(
                 unknown.iter().map(|key| format!("config {}: unknown key `{key}`", path.display())),
             );
-            problems.extend(
-                config.texts.problems().iter().map(|p| format!("config {}: {p}", path.display())),
-            );
+            let found = config.texts.problems().into_iter().chain(config.auth.problems());
+            problems.extend(found.map(|p| format!("config {}: {p}", path.display())));
             config
         }
         Err(err) => {
@@ -426,6 +437,21 @@ mod tests {
         assert_eq!(parse("").unwrap().0.auth.user, None);
         let config = parse("[auth]\nuser = \"edraven\"\n").unwrap().0;
         assert_eq!(config.auth.user.as_deref(), Some("edraven"));
+    }
+
+    #[test]
+    fn fixed_user_pins_only_a_configured_user() {
+        let mut auth = parse("[auth]\nuser = \"edraven\"\nfixed-user = true\n").unwrap().0.auth;
+        assert!(auth.problems().is_empty());
+        assert!(auth.fixed_user);
+        assert!(!parse("").unwrap().0.auth.fixed_user);
+        for unset in ["[auth]\nfixed-user = true\n", "[auth]\nuser = \"\"\nfixed-user = true\n"] {
+            let mut auth = parse(unset).unwrap().0.auth;
+            let problems = auth.problems();
+            assert_eq!(problems.len(), 1, "{unset}: {problems:?}");
+            assert!(problems[0].starts_with("`auth.fixed-user` pins `auth.user`"), "{problems:?}");
+            assert!(!auth.fixed_user, "{unset}");
+        }
     }
 
     #[test]

@@ -14,6 +14,7 @@ mod seat;
 mod sessions;
 mod state;
 mod ui;
+mod users;
 mod widgets;
 
 use gtk4 as gtk;
@@ -59,12 +60,9 @@ fn main() {
         problems.extend(ui::load_css(&style));
 
         let saved = state::load();
-        let initial_username = saved
-            .last_user
-            .clone()
-            .or_else(|| loaded.config.auth.user.clone())
-            .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
-            .unwrap_or_default();
+        let demo_user = if args.demo { std::env::var("USER").ok() } else { None };
+        let initial_username =
+            users::initial(saved.last_user.as_deref(), &loaded.config.auth, demo_user.as_deref());
 
         let layout_path = loaded.resolve(args.layout.as_deref(), &loaded.config.paths.layout);
         let layout = layout::load(&layout_path, !args.demo, !initial_username.is_empty());

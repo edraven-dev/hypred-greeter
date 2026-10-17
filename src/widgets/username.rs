@@ -17,8 +17,13 @@ impl WidgetDef for UsernameDef {
         let entry = gtk::Entry::builder()
             .placeholder_text(node.props.str_or("placeholder", "username")?)
             .text(ctx.app.username())
+            .editable(!ctx.config.auth.fixed_user)
             .build();
         apply_entry_props(&entry, node)?;
+        // GTK marks neither a read-only entry nor its text node.
+        if ctx.config.auth.fixed_user {
+            entry.add_css_class("hg-username-fixed");
+        }
 
         let app = ctx.app.clone();
         entry.connect_changed(move |entry| {
