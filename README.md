@@ -58,7 +58,7 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
 | `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (`dark` is then off: GTK has no Empty-dark) | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `fixed-user` (`true`: always `user`, even over a remembered one — the `username` entry turns read-only; without `user` it is ignored and named in the banner), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `false`, `30`, `400` |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `fixed-user` (`true`: always `user`, even over a remembered one — the `username` widget turns read-only, a picker disabled; without `user` it is ignored and named in the banner), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `false`, `30`, `400` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
 | `[keys]` | a map: `"<accelerator>" = "action"` — a key as GTK writes it (`"<Control><Alt>Delete"`, `F2`, `"<Super>l"`) to an action as a `button` names it — see below | none |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
@@ -144,9 +144,9 @@ or array, extra CSS classes), `halign`/`valign` (`start`/`center`/`end`/
 `width`/`height` (pixels, or a share of the window such as `"26%"`; sizing
 from the stylesheet with the `--hg-vw` variables is the way meant for
 themes — see style.css below), `visible`, `focus` (takes the focus once
-shown; without it the username entry gets it when no user is known, else the
-password), `focusable = false` (skipped by Tab and clicks — for a widget that
-must not take the focus from the entries).
+shown; without it the `username` widget gets it when no user is known, else
+the password), `focusable = false` (skipped by Tab and clicks — for a
+widget that must not take the focus from the entries).
 
 `spacing` and `margin` given in TOML are floors the stylesheet only adds to;
 prefer `border-spacing` and `margin` in style.css, where a theme can change
@@ -172,7 +172,7 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 | `image` | exactly one of `file` (a path; relative to the config dir), `icon` (theme icon name), `source = "avatar"`; `size` (pixels) | a picture. `avatar`: the current user's — `/var/lib/AccountsService/icons/<user>`, then `~<user>/.face`; re-read as the username changes; nothing readable (or anything but a regular file of at most 1 MiB and 4096 px a side) shows nothing. Without `size` a GtkImage shows at the stylesheet's `-gtk-icon-size` (16 px unless set); `size` is the box the picture fits in |
 | `background` | `image`, `fit` | wallpaper; defaults from `[background]` |
 | `clock` | `format` (strftime), text properties | ticks every second |
-| `username` | `placeholder`, `xalign` | prefilled with the last user (else `[auth] user`); Enter moves on to the password. `[auth] fixed-user`: read-only, with `.hg-username-fixed` |
+| `username` | `style` (`entry`, `dropdown`, `buttons`; default `entry`), for `entry`: `placeholder`, `xalign`; for `dropdown`/`buttons`: `users` (names; default the local users: a UID within /etc/login.defs' `UID_MIN`..`UID_MAX`, else 1000..60000, and a login shell listed in /etc/shells other than nologin/false); for `buttons`: `orientation`, `spacing` (0) | prefilled with the last user (else `[auth] user`); Enter moves on to the password. `dropdown`/`buttons` offer `users` plus the user shown at startup; a pick moves on to the password and opens an eager conversation at once. `buttons`: a linked row of toggle buttons (`.hg-username-item`, the selected one `:checked`); the dropdown shows a name it does not list (none yet, or one typed into an entry) as an extra last row. Every `username` follows the others. No user to offer: an entry instead, and a banner line. `[auth] fixed-user`: read-only (a picker disabled), with `.hg-username-fixed` |
 | `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
 | `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
 | `session` | `style` (`dropdown`, `buttons`, `cycle`), for `buttons`: `orientation`, `spacing` | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
@@ -200,7 +200,9 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 | `.hg-background` | the wallpaper picture |
 | `.hg-clock` | the clock label |
 | `entry.hg-username` | username entry |
-| `.hg-username.hg-username-fixed` | the username entry while `[auth] fixed-user` pins it (read-only) |
+| `dropdown.hg-username`, `dropdown.hg-username > button` | username picker (`style = "dropdown"`) |
+| `.hg-username .hg-username-item`, `… .hg-username-item:checked` | username picker buttons (`style = "buttons"`), the selected one |
+| `.hg-username.hg-username-fixed` | the username widget while `[auth] fixed-user` pins it (a picker is `:disabled` too) |
 | `entry.hg-password` | password entry (GtkPasswordEntry) |
 | `entry.hg-password.hg-password-busy` | … while a submitted password is on its way (read-only) |
 | `.hg-message`, `.hg-message.hg-message-error` | PAM messages / auth errors (also `-info`, `-prompt`, `-empty` — see state classes) |

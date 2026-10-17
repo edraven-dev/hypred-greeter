@@ -38,8 +38,8 @@ rearm-window = 0
 # The username shown when nothing is remembered yet (a layout without a
 # `username` widget needs one).
 # user = "edraven"
-# Always `user`, even over a remembered one: the username entry turns
-# read-only. Without `user` it is ignored.
+# Always `user`, even over a remembered one: the username widget turns
+# read-only (a picker disabled). Without `user` it is ignored.
 fixed-user = false
 # Text left in the password entry keeps a parked prompt ready (no re-arm)
 # for this many seconds after the last input.

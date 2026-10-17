@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::auth::Auth;
 use crate::config::Config;
 use crate::layout::{build, Node};
-use crate::ui::bus::{Bus, UiEvent};
+use crate::ui::bus::{Bus, FocusTarget, UiEvent};
 use crate::widgets::Registry;
 
 pub struct Shared {
@@ -83,6 +83,17 @@ impl AppHandle {
         if let Some(index) = self.shared.preselected_session() {
             self.select_session(index);
         }
+    }
+
+    /// A picker's choice: like Enter in the username entry, minus the wait
+    /// for typing to settle.
+    pub fn pick_user(&self, name: &str) {
+        if name == self.username() {
+            return;
+        }
+        self.set_username(name);
+        self.emit(&UiEvent::Focus(FocusTarget::Password));
+        self.auth.start_eager(name);
     }
 
     /// The selected session's display name; empty without sessions.
@@ -268,6 +279,19 @@ mod tests {
             assert_eq!(app.session_name(), "Hyprland (uwsm-managed)");
         });
         assert_eq!(log, ["session 1", "session 0", "session 1"]);
+    }
+
+    #[test]
+    fn a_pick_moves_on_to_the_password_unless_its_name_is_shown() {
+        let mut state = State::default();
+        state.last_session.insert("touch".into(), "wayland/hyprland-uwsm".into());
+        let shared = Shared::new("fprint".into(), sessions(), state, None);
+        let log = events(shared, |app| {
+            app.pick_user("fprint");
+            app.pick_user("touch");
+            assert_eq!(app.username(), "touch");
+        });
+        assert_eq!(log, ["username touch", "session 1", "Focus(Password)"]);
     }
 
     #[test]
