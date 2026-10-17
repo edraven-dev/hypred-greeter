@@ -26,7 +26,7 @@ use greetd_ipc::{AuthMessageType, Request, Response};
 use crate::backend::{Backend, BackendError};
 use crate::config::{self, Rearm, TextKind};
 use crate::log::{error, info};
-use crate::ui::bus::{Bus, UiEvent};
+use crate::ui::bus::{Bus, FocusTarget, UiEvent};
 
 /// A park sooner than this after CreateSession means no cycle ran.
 const REARM_SPIN_GUARD: Duration = Duration::from_secs(1);
@@ -241,7 +241,9 @@ impl Auth {
             return;
         }
         if username.is_empty() {
+            // Focus after the error: the password entry grabs it on every AuthError.
             self.emit(UiEvent::AuthError(self.texts.enter_username.clone()));
+            self.emit(UiEvent::Focus(FocusTarget::Username));
             return;
         }
         self.emit(UiEvent::Busy(true));
@@ -1003,12 +1005,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_username_is_rejected_before_ipc() {
-        let log = drive(|auth, pump| {
-            auth.begin(String::new(), "pw".into());
+    fn empty_username_is_rejected_before_ipc_and_takes_the_focus_after_the_error() {
+        let (backend, seen, _) = scripted(password_only);
+        let log = drive_with(backend, config::Auth::default(), |auth, pump| {
+            show("");
+            auth.submit("pw".into());
             pump();
         });
-        assert_eq!(log, ["autherror enter a username"]);
+        assert!(requests(&seen).is_empty(), "{:?}", requests(&seen));
+        assert_eq!(log, ["autherror enter a username", "focus Username"]);
     }
 
     #[test]
@@ -1683,7 +1688,7 @@ mod tests {
                 pump();
             },
         );
-        assert_eq!(log, ["autherror Wer bist du?"]);
+        assert_eq!(log, ["autherror Wer bist du?", "focus Username"]);
     }
 
     #[test]
