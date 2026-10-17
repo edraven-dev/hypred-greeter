@@ -476,6 +476,7 @@ mod tests {
         for clears in [
             UiEvent::Prompt { secret: true, text: "Password:".into(), passive: false },
             UiEvent::Info("Place your finger".into()),
+            UiEvent::Info(String::new()),
             UiEvent::Armed(true),
             UiEvent::Busy(true),
         ] {

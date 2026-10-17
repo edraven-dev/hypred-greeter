@@ -224,6 +224,14 @@ mod tests {
     /// Runs `scenario` with a handle over `shared` and returns the events
     /// it caused, on a context of its own like the auth tests.
     fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+        events_with(crate::config::Texts::default(), shared, scenario)
+    }
+
+    fn events_with(
+        texts: crate::config::Texts,
+        shared: Rc<Shared>,
+        scenario: impl FnOnce(&AppHandle),
+    ) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         let acquired = context.with_thread_default(|| {
@@ -241,7 +249,7 @@ mod tests {
                 bus.clone(),
                 true,
                 &crate::config::Auth::default(),
-                &crate::config::Texts::default(),
+                &texts,
                 crate::auth::Hooks {
                     current_username: Box::new(String::new),
                     resolve_start: Box::new(|_| (vec![], vec![])),
@@ -280,5 +288,16 @@ mod tests {
             app.set_username("bob");
         });
         assert_eq!(log, ["username bo", "username bob", "session 1"]);
+    }
+
+    #[test]
+    fn a_widget_clear_gets_through_rules_that_drop_every_text() {
+        let texts = toml::from_str("[[rewrite]]\nmatch = '.*'\nregex = true\ntext = ''\n").unwrap();
+        let shared = Shared::new(String::new(), sessions(), State::default(), None);
+        let log = events_with(texts, shared, |app| {
+            app.emit(&UiEvent::Info("demo: would run systemctl reboot".into()));
+            app.emit(&UiEvent::Info(String::new()));
+        });
+        assert_eq!(log, ["Info(\"\")"]);
     }
 }

@@ -156,7 +156,7 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 | `clock` | `format` (strftime), text properties | ticks every second |
 | `username` | `placeholder`, `xalign` | prefilled with the last user (else `[auth] user`); Enter moves on to the password |
 | `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
-| `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
+| `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays; else it goes after this long, and the window's `.hg-failed` with it), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
 | `session` | `style` (`dropdown`, `buttons`, `cycle`), for `buttons`: `orientation`, `spacing` | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
 | `power` | `reboot-label`, `poweroff-label`, `orientation`, `spacing` (0) | sugar: a box of two `button`s named `#hg-power-reboot` / `#hg-power-poweroff` with `action = "reboot"` / `"poweroff"` — build the same by hand for a third one |
 
@@ -230,7 +230,7 @@ message label:
 | class | while |
 |---|---|
 | `.hg-busy` | a submitted password is on its way |
-| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm or submission; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
+| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
 | `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
 | `.hg-starting` | the session is being started (stays until the greeter exits) |
