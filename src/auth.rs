@@ -732,6 +732,7 @@ mod tests {
     use crate::backend::scripted::{Gate, ScriptedBackend, Step};
     use crate::backend::DemoBackend;
     use greetd_ipc::AuthMessageType::{Info, Secret, Visible};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     thread_local! {
@@ -1706,5 +1707,159 @@ mod tests {
         assert_eq!(requests(&seen), ["create edraven"]);
         let parked = ["armed true", "armed false", "busy false", "prompt[true,passive] Password:"];
         assert_eq!(log, parked);
+    }
+
+    /// pam_fprintd ended its cycle without "Verification timed out": the
+    /// verify was cancelled at suspend ("Cannot run while suspended.") or
+    /// fprintd vanished — AUTHINFO_UNAVAIL either way, pam_unix asks next.
+    fn fprint_cut_short(_: &str) -> Vec<Step> {
+        vec![Step::Msg(Info, "Place your finger"), Step::Msg(Secret, "Password:")]
+    }
+
+    #[test]
+    fn a_cycle_cut_short_rearms_at_once() {
+        let seen = rearm_scenario(fprint_cut_short, eager_always(), Duration::from_secs(2));
+        let cycle = ["create edraven", "respond None"];
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn a_cycle_cut_short_within_a_second_waits_for_the_timer() {
+        let (backend, seen, _) = scripted(fprint_cut_short);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(Duration::from_millis(300), Duration::from_millis(300));
+            auth.start_eager("edraven");
+            pump();
+            assert_eq!(requests(&seen), ["create edraven", "respond None"]);
+            assert_eq!(auth.quick_ends.get(), 1);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+        });
+    }
+
+    static STUCK_CONVERSATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    /// After a suspend the first cycle is cut short and every later Claim
+    /// fails ("The device has already been opened!"): pam_fprintd returns
+    /// at once and pam_unix asks immediately.
+    fn suspended_then_stuck(_: &str) -> Vec<Step> {
+        if STUCK_CONVERSATIONS.fetch_add(1, Ordering::SeqCst) == 0 {
+            fprint_cut_short("")
+        } else {
+            password_only("")
+        }
+    }
+
+    #[test]
+    fn a_reader_that_never_arms_again_is_retried_forever_at_six_seconds() {
+        STUCK_CONVERSATIONS.store(0, Ordering::SeqCst);
+        let (backend, seen, _) = scripted(suspended_then_stuck);
+        // fprintd exits only after 30 s without a client: every retry of a
+        // stuck reader comes within 6 s and keeps it alive.
+        drive_with(Box::new(DemoBackend::new()), eager_always(), |auth, _| {
+            let real: Vec<_> = (0..40).map(|n| auth.retry_delay(n, false)).collect();
+            assert!(real.iter().all(|d| *d <= Duration::from_secs(6)), "{real:?}");
+        });
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(Duration::from_millis(2), Duration::from_millis(2));
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            assert!(pump_until(pump, || creates(&seen) >= 12), "{:?}", requests(&seen));
+            assert!(auth.quick_ends.get() >= 10, "{}", auth.quick_ends.get());
+        });
+        // Every retry flashes .hg-armed although nothing was ever armed.
+        let armed = log.iter().filter(|e| *e == "armed true").count();
+        assert!(armed >= 12, "{log:?}");
+        assert_eq!(log.iter().filter(|e| e.starts_with("info Place")).count(), 1, "{log:?}");
+    }
+
+    static CRASHES: AtomicUsize = AtomicUsize::new(0);
+
+    /// fprintd vanishes mid-verify; the D-Bus activation behind pam_fprintd's
+    /// Release brings a fresh one, so the next conversation arms normally.
+    fn crash_then_fresh(_: &str) -> Vec<Step> {
+        if CRASHES.fetch_add(1, Ordering::SeqCst) == 0 {
+            fprint_cut_short("")
+        } else {
+            vec![Step::Msg(Info, "Place your finger"), Step::Wait]
+        }
+    }
+
+    #[test]
+    fn an_fprintd_crash_rearms_and_the_next_touch_logs_in() {
+        CRASHES.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(crash_then_fresh);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            gate.release();
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "cancel",
+            "create edraven",
+            "respond None",
+            "start true",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    /// pam_fprintd's max-tries (3) no-matches end it with PAM_MAXTRIES,
+    /// which `sufficient` ignores: pam_unix asks next.
+    fn three_no_matches(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn no_match_errors_are_acked_and_max_tries_rearms_at_once() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+        });
+        let mut cycle = vec!["create edraven"];
+        cycle.extend(std::iter::repeat_n("respond None", 6));
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(requests(&seen), expected);
+        let errors = log.iter().filter(|e| e.starts_with("pamerror Failed")).count();
+        assert_eq!(errors, 6, "{log:?}");
+        // Still armed through the no-matches: the reader is waiting again.
+        let first_park = log.iter().position(|e| e.starts_with("prompt")).unwrap();
+        assert_eq!(log[..first_park].iter().filter(|e| *e == "armed false").count(), 1, "{log:?}");
+    }
+
+    #[test]
+    fn a_no_match_then_a_match_starts_the_session() {
+        let (backend, seen, gate) = scripted(|_| {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Wait,
+            ]
+        });
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            pump();
+        });
+        let expected =
+            ["create edraven", "respond None", "respond None", "respond None", "start true"];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
     }
 }
