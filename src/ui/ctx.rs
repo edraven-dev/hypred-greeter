@@ -146,6 +146,8 @@ pub struct BuildCtx<'a> {
     pub bus: Rc<Bus>,
     pub app: AppHandle,
     pub demo: bool,
+    /// Built for --check, never shown: nothing is run.
+    pub check: bool,
     problems: RefCell<Vec<String>>,
 }
 
@@ -156,9 +158,11 @@ impl<'a> BuildCtx<'a> {
         registry: &'a Registry,
         app: AppHandle,
         demo: bool,
+        check: bool,
     ) -> Self {
         let bus = app.bus.clone();
-        Self { config, base_dir, registry, bus, app, demo, problems: RefCell::new(Vec::new()) }
+        let problems = RefCell::new(Vec::new());
+        Self { config, base_dir, registry, bus, app, demo, check, problems }
     }
 
     pub fn resolve_path(&self, path: &std::path::Path) -> std::path::PathBuf {

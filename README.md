@@ -52,6 +52,13 @@ relative one from the current directory:
 hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 ```
 
+`--check` loads all three as the greeter under greetd does — a layout that
+makes login impossible is swapped for the built-in one, where `--demo` keeps
+it — and builds the widgets, without a window, greetd or label commands. It
+prints every problem the banner would show to stderr and exits 1 if there is
+one, 0 if not. It needs a display: run it from your desktop session before
+logging out onto a new config, stylesheet, layout or package.
+
 ### config.toml
 
 | section | keys | default |
@@ -321,7 +328,8 @@ possible later without breaking existing widgets.
   a `password` widget.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
-  transport failure, `101` panic.
+  transport failure, `101` panic; with `--check`, `0` nothing to report and
+  `1` problems.
 
 ## Fingerprint (pam_fprintd)
 
