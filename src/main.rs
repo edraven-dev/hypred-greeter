@@ -196,6 +196,12 @@ fn main() {
         }
         window.present();
 
+        // GTK runs the controller added last first, and a key a shortcut
+        // takes goes no further: the activity watcher is added after these,
+        // so a bound key still counts as input.
+        for controller in shortcuts {
+            window.add_controller(controller);
+        }
         // Capture phase: sees every key/pointer event before a child can
         // stop it.
         let activity = gtk::EventControllerLegacy::new();
@@ -217,11 +223,6 @@ fn main() {
             gtk::glib::Propagation::Proceed
         });
         window.add_controller(activity);
-        // After the activity watcher: a bound key stops the event, and it
-        // still counts as input.
-        for controller in shortcuts {
-            window.add_controller(controller);
-        }
         handle.auth.start_eager(&handle.username());
     });
 
