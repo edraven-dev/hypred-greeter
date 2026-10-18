@@ -195,7 +195,7 @@ impl<'a> BuildCtx<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sessions::{Kind, Session};
     use crate::state::State;
@@ -234,7 +234,7 @@ mod tests {
 
     /// Runs `scenario` with a handle over `shared` and returns the events
     /// it caused, on a context of its own like the auth tests.
-    fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+    pub(crate) fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         let acquired = context.with_thread_default(|| {
@@ -264,7 +264,8 @@ mod tests {
         });
         acquired.expect("test context must be acquirable");
         std::mem::forget(context);
-        Rc::try_unwrap(log).unwrap().into_inner()
+        // A command still running holds a handle, and through its bus the log.
+        log.take()
     }
 
     #[test]

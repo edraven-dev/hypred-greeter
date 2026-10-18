@@ -4,13 +4,19 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::config::{Commands, Config, Texts};
-use crate::log::error;
+use crate::log::{error, warn_};
 use crate::ui::bus::{FocusTarget, UiEvent};
 use crate::ui::ctx::AppHandle;
 
 const BUILT_IN: &str = "cancel, next-session, prev-session, focus-username, focus-password";
+
+/// A command that fails later than this after its click is a long-lived
+/// helper dying, not an answer to the click.
+const REPORT_WITHIN: Duration = Duration::from_secs(10);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -59,27 +65,40 @@ fn run(app: &AppHandle, demo: bool, texts: &Texts, argv: &[String]) {
         app.emit(&UiEvent::Info(format!("demo: would run {}", argv.join(" "))));
         return;
     }
-    let spawned = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .env_remove("GREETD_SOCK")
-        .spawn();
+    let spawned =
+        Command::new(program).args(args).stdin(Stdio::null()).env_remove("GREETD_SOCK").spawn();
     match spawned {
-        // Reaped off the main thread: a dropped Child stays a zombie.
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
+        Ok(child) => {
+            let failure = reap(child, Instant::now() + REPORT_WITHIN);
+            let (app, template, argv) = (app.clone(), texts.power_failed.clone(), argv.to_vec());
+            glib::spawn_future_local(async move {
+                if let Ok(why) = failure.recv().await {
+                    report(&app, &template, &argv, &why);
+                }
             });
         }
-        // A PamError: an AuthError would wipe a half-typed password.
-        Err(err) => {
-            let text = texts
-                .power_failed
-                .replace("{program}", program)
-                .replace("{error}", &err.to_string());
-            app.emit(&UiEvent::PamError(text));
-        }
+        Err(err) => report(app, &texts.power_failed, argv, &err.to_string()),
     }
+}
+
+/// Waits for `child` off the main thread (a dropped Child stays a zombie)
+/// and hands over how it failed, if it did before `deadline`.
+fn reap(mut child: Child, deadline: Instant) -> async_channel::Receiver<String> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let Ok(status) = child.wait() else { return };
+        if !status.success() && Instant::now() < deadline {
+            let _ = tx.send_blocking(status.to_string());
+        }
+    });
+    rx
+}
+
+/// A PamError: an AuthError would wipe a half-typed password.
+fn report(app: &AppHandle, template: &str, argv: &[String], why: &str) {
+    warn_!("command `{}`: {why}", argv.join(" "));
+    let text = template.replace("{program}", &argv[0]).replace("{error}", why);
+    app.emit(&UiEvent::PamError(text));
 }
 
 /// The `[keys]` table on the window. Capture phase: a bound key works
@@ -182,9 +201,58 @@ fn types(key: gdk::Key, modifiers: gdk::ModifierType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::State;
+    use crate::ui::ctx::{tests::events, Shared};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn a_failed_exit_is_handed_over_until_the_deadline() {
+        let reaped = |words: &[&str], within: Duration| {
+            let child = Command::new(words[0]).args(&words[1..]).spawn().unwrap();
+            reap(child, Instant::now() + within).recv_blocking().ok()
+        };
+        let failed = reaped(&["sh", "-c", "exit 3"], REPORT_WITHIN);
+        assert_eq!(failed.as_deref(), Some("exit status: 3"));
+        let killed = reaped(&["sh", "-c", "kill -TERM $$"], REPORT_WITHIN);
+        assert_eq!(killed.as_deref(), Some("signal: 15 (SIGTERM)"));
+        assert_eq!(reaped(&["true"], REPORT_WITHIN), None);
+        assert_eq!(reaped(&["sh", "-c", "exit 3"], Duration::ZERO), None);
+    }
+
+    #[test]
+    fn a_command_that_cannot_start_or_exits_unsuccessfully_is_a_pam_error() {
+        let shared = Shared::new(String::new(), Vec::new(), State::default(), None);
+        let log = events(shared, |app| {
+            let errors = Rc::new(Cell::new(0));
+            let counter = errors.clone();
+            app.bus.subscribe(move |event| {
+                if let UiEvent::PamError(_) = event {
+                    counter.set(counter.get() + 1);
+                }
+            });
+            let texts = Texts::default();
+            for words in [&["true"][..], &["/nonexistent/prog"], &["sh", "-c", "exit 3"]] {
+                run(app, false, &texts, &argv(words));
+            }
+            let context = glib::MainContext::ref_thread_default();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while errors.get() < 2 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+                while context.iteration(false) {}
+            }
+        });
+        assert_eq!(
+            log,
+            [
+                "PamError(\"/nonexistent/prog: No such file or directory (os error 2)\")",
+                "PamError(\"sh: exit status: 3\")",
+            ]
+        );
     }
 
     #[test]

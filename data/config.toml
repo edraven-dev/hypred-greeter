@@ -89,6 +89,8 @@ x11-suffix = " (X11)"
 enter-username = "enter a username"
 username-changed = "username changed — enter the password again"
 auth-failed = "authentication failed"
+# A power, button or [keys] command that cannot start, or exits
+# unsuccessfully within 10 s ({error} is then "exit status: 1", say).
 power-failed = "{program}: {error}"
 # Rewrite rules for everything shown — PAM info and errors, prompts,
 # failures: the first rule whose `match` is found in the text (a
