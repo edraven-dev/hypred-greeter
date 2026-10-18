@@ -197,12 +197,19 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
 /// finger" in between), so a CSS animation on it restarts on every failure.
 fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
     match event {
-        UiEvent::Busy(true) => vec![("hg-busy", true), ("hg-failed", false)],
+        UiEvent::Busy(true) => {
+            vec![("hg-busy", true), ("hg-failed", false), ("hg-prompt-visible", false)]
+        }
         UiEvent::Busy(false) => vec![("hg-busy", false), ("hg-starting", false)],
         UiEvent::AuthError(_) | UiEvent::PamError(_) => {
-            vec![("hg-failed", true), ("hg-info", false)]
+            vec![("hg-failed", true), ("hg-info", false), ("hg-prompt-visible", false)]
         }
-        UiEvent::Prompt { .. } => vec![("hg-failed", false), ("hg-info", false)],
+        UiEvent::Prompt { secret, .. } => {
+            vec![("hg-failed", false), ("hg-info", false), ("hg-prompt-visible", !secret)]
+        }
+        UiEvent::Info(text) if text.is_empty() => {
+            vec![("hg-failed", false), ("hg-info", false), ("hg-prompt-visible", false)]
+        }
         UiEvent::Info(text) => vec![("hg-failed", false), ("hg-info", !text.is_empty())],
         UiEvent::Armed(true) => vec![("hg-armed", true), ("hg-failed", false)],
         UiEvent::Armed(false) => vec![("hg-armed", false)],
@@ -342,5 +349,40 @@ mod tests {
         assert!(state_changes(&UiEvent::Focus(FocusTarget::Password)).is_empty());
         assert!(state_changes(&UiEvent::SessionChanged(1)).is_empty());
         assert!(state_changes(&UiEvent::UsernameChanged("bob".into())).is_empty());
+    }
+
+    #[test]
+    fn a_pending_visible_prompt_marks_the_window() {
+        let on = |event: &UiEvent| {
+            let changes = state_changes(event);
+            changes.iter().find(|(class, _)| *class == "hg-prompt-visible").map(|(_, on)| *on)
+        };
+        let prompt = |secret, passive| UiEvent::Prompt { secret, text: "Token:".into(), passive };
+        assert_eq!(on(&prompt(false, false)), Some(true));
+        assert_eq!(on(&prompt(false, true)), Some(true));
+        for ends in [
+            prompt(true, false),
+            prompt(true, true),
+            UiEvent::Busy(true),
+            UiEvent::AuthError("no".into()),
+            UiEvent::PamError("no".into()),
+            UiEvent::Info(String::new()),
+        ] {
+            assert_eq!(on(&ends), Some(false), "{ends:?}");
+        }
+        for leaves in [
+            UiEvent::Info("demo: any token accepted".into()),
+            UiEvent::Busy(false),
+            UiEvent::Armed(true),
+            UiEvent::Armed(false),
+            UiEvent::Starting,
+            UiEvent::Focus(FocusTarget::Password),
+            UiEvent::SessionChanged(1),
+            UiEvent::UsernameChanged("mfa".into()),
+        ] {
+            assert_eq!(on(&leaves), None, "{leaves:?}");
+        }
+        let cleared = state_changes(&UiEvent::Info(String::new()));
+        assert!(cleared.contains(&("hg-failed", false)) && cleared.contains(&("hg-info", false)));
     }
 }
