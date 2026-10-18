@@ -182,9 +182,7 @@ impl WidgetDef for MessageDef {
                         if let Some(label) = weak.upgrade() {
                             show(&label, "", State::Empty, hide_empty);
                         }
-                        // Through the bus, so the window's `.hg-failed`
-                        // ends with the error.
-                        app.emit(&UiEvent::Info(String::new()));
+                        app.clear_failed();
                     });
                 }
                 UiEvent::Prompt { secret, text, passive } => {

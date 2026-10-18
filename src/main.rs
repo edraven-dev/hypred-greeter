@@ -184,7 +184,7 @@ fn main() {
             window.add_css_class("hg-problems");
         }
         window.set_child(Some(&ui::window_content(&problems, root)));
-        ui::track_states(&window, &handle.bus);
+        ui::track_states(&window, &handle);
         handle.emit(&UiEvent::UsernameChanged(handle.username()));
         if args.demo {
             // No title bar: the published viewport is the surface's size,

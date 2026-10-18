@@ -16,6 +16,7 @@ pub struct Shared {
     pub selected_session: Cell<usize>,
     pub state: RefCell<crate::state::State>,
     default_session: Option<usize>,
+    clear_failed: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl Shared {
@@ -33,6 +34,7 @@ impl Shared {
             selected_session: Cell::new(0),
             state: RefCell::new(state),
             default_session,
+            clear_failed: RefCell::default(),
         };
         shared.selected_session.set(shared.preselected_session().unwrap_or(0));
         Rc::new(shared)
@@ -137,6 +139,19 @@ impl AppHandle {
     pub fn emit(&self, event: &UiEvent) {
         self.auth.emit(event.clone());
     }
+
+    /// Ends the window's `.hg-failed` alone. An empty info would end it
+    /// too, but every widget takes that for a dropped conversation.
+    pub fn clear_failed(&self) {
+        let hook = self.shared.clear_failed.borrow().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub fn connect_clear_failed(&self, hook: impl Fn() + 'static) {
+        *self.shared.clear_failed.borrow_mut() = Some(Rc::new(hook));
+    }
 }
 
 pub struct BuildCtx<'a> {
@@ -228,14 +243,6 @@ mod tests {
     /// Runs `scenario` with a handle over `shared` and returns the events
     /// it caused, on a context of its own like the auth tests.
     fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
-        events_with(crate::config::Texts::default(), shared, scenario)
-    }
-
-    fn events_with(
-        texts: crate::config::Texts,
-        shared: Rc<Shared>,
-        scenario: impl FnOnce(&AppHandle),
-    ) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         let acquired = context.with_thread_default(|| {
@@ -253,7 +260,7 @@ mod tests {
                 bus.clone(),
                 true,
                 &crate::config::Auth::default(),
-                &texts,
+                &crate::config::Texts::default(),
                 crate::auth::Hooks {
                     current_username: Box::new(String::new),
                     resolve_start: Box::new(|_| (vec![], vec![])),
@@ -295,13 +302,17 @@ mod tests {
     }
 
     #[test]
-    fn a_widget_clear_gets_through_rules_that_drop_every_text() {
-        let texts = toml::from_str("[[rewrite]]\nmatch = '.*'\nregex = true\ntext = ''\n").unwrap();
+    fn clearing_the_failed_state_tells_no_widget() {
         let shared = Shared::new(String::new(), sessions(), State::default(), None);
-        let log = events_with(texts, shared, |app| {
-            app.emit(&UiEvent::Info("demo: would run systemctl reboot".into()));
-            app.emit(&UiEvent::Info(String::new()));
+        let cleared = Rc::new(Cell::new(0));
+        let count = cleared.clone();
+        let log = events(shared, move |app| {
+            app.clear_failed();
+            app.connect_clear_failed(move || count.set(count.get() + 1));
+            app.clear_failed();
+            app.clone().clear_failed();
         });
-        assert_eq!(log, ["Info(\"\")"]);
+        assert!(log.is_empty(), "{log:?}");
+        assert_eq!(cleared.get(), 2);
     }
 }

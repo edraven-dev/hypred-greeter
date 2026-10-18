@@ -10,7 +10,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::config;
-use crate::ui::bus::{Bus, UiEvent};
+use crate::ui::bus::UiEvent;
+use crate::ui::ctx::AppHandle;
 
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
 const COLOR_SCHEME: &str = "gtk-interface-color-scheme";
@@ -126,10 +127,16 @@ fn capped(mut lines: Vec<String>, limit: usize) -> Vec<String> {
 }
 
 /// Window state classes: any descendant can react (`.hg-failed #card {…}`).
-pub fn track_states(window: &gtk::ApplicationWindow, bus: &Bus) {
-    let weak = window.downgrade();
+pub fn track_states(window: &gtk::ApplicationWindow, app: &AppHandle) {
     let failed = Rc::new(Failed::default());
-    bus.subscribe(move |event| {
+    let (weak, clearing) = (window.downgrade(), failed.clone());
+    app.connect_clear_failed(move || {
+        if let Some(window) = weak.upgrade() {
+            clearing.clear(&window);
+        }
+    });
+    let weak = window.downgrade();
+    app.bus.subscribe(move |event| {
         let Some(window) = weak.upgrade() else { return };
         for (class, on) in state_changes(event) {
             match (class, on) {
