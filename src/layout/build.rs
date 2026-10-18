@@ -31,6 +31,7 @@ pub fn build_node(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
             for key in node.props.unconsumed() {
                 ctx.problem(format!("{} ({}): unknown property `{key}`", node.path, node.kind));
             }
+            ctx.note_built(&node.kind);
             widget
         }
         Err(err) => placeholder(ctx, node, &err),

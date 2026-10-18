@@ -162,9 +162,19 @@ fn main() {
             args.demo,
             args.check,
         );
-        let root = layout::build::build_node(&ctx, &layout.root);
+        let fallback;
+        let mut tree = &layout.root;
+        let mut root = layout::build::build_node(&ctx, tree);
+        // A password widget that fell back to the ⚠ placeholder (a bad
+        // property) would leave no way to log in.
+        if !args.demo && !ctx.built("password") {
+            ctx.problem("the `password` widget failed to build — using built-in layout".into());
+            fallback = layout::builtin();
+            tree = &fallback;
+            root = layout::build::build_node(&ctx, tree);
+        }
         problems.extend(ctx.take_problems());
-        let focus_placed = layout::requests_focus(&layout.root);
+        let focus_placed = layout::requests_focus(tree);
         let shortcuts = actions::shortcuts(&loaded.config, &handle, args.demo, &mut problems);
 
         // Every problem source comes before this: --check ends here.

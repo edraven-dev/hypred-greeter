@@ -178,6 +178,8 @@ pub struct BuildCtx<'a> {
     /// Built for --check, never shown: nothing is run.
     pub check: bool,
     problems: RefCell<Vec<String>>,
+    /// Kinds that built without falling back to the ⚠ placeholder.
+    built: RefCell<std::collections::HashSet<String>>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -191,7 +193,17 @@ impl<'a> BuildCtx<'a> {
     ) -> Self {
         let bus = app.bus.clone();
         let problems = RefCell::new(Vec::new());
-        Self { config, base_dir, registry, bus, app, demo, check, problems }
+        Self {
+            config,
+            base_dir,
+            registry,
+            bus,
+            app,
+            demo,
+            check,
+            problems,
+            built: RefCell::default(),
+        }
     }
 
     pub fn resolve_path(&self, path: &std::path::Path) -> std::path::PathBuf {
@@ -213,6 +225,14 @@ impl<'a> BuildCtx<'a> {
 
     pub fn take_problems(&self) -> Vec<String> {
         self.problems.take()
+    }
+
+    pub fn note_built(&self, kind: &str) {
+        self.built.borrow_mut().insert(kind.to_string());
+    }
+
+    pub fn built(&self, kind: &str) -> bool {
+        self.built.borrow().contains(kind)
     }
 }
 

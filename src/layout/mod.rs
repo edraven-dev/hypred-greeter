@@ -34,15 +34,19 @@ pub fn load(path: &Path, require_auth: bool, known_user: bool) -> Loaded {
             }
         });
 
-    let root = root.unwrap_or_else(|| {
-        let mut default_problems = Vec::new();
-        let root = parse_str(DEFAULT_LAYOUT, &mut default_problems)
-            .expect("embedded default layout must parse (covered by unit test)");
-        assert!(default_problems.is_empty(), "embedded default layout: {default_problems:?}");
-        root
-    });
+    let root = root.unwrap_or_else(builtin);
 
     Loaded { root, problems }
+}
+
+/// The built-in layout, also the fallback for one that makes login
+/// impossible.
+pub fn builtin() -> Node {
+    let mut problems = Vec::new();
+    let root = parse_str(DEFAULT_LAYOUT, &mut problems)
+        .expect("embedded default layout must parse (covered by unit test)");
+    assert!(problems.is_empty(), "embedded default layout: {problems:?}");
+    root
 }
 
 pub fn parse_str(text: &str, problems: &mut Vec<String>) -> Option<Node> {
