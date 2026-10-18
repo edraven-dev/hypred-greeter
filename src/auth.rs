@@ -2905,7 +2905,7 @@ mod tests {
     }
 
     fn last_opened(seen: &Seen) -> Option<String> {
-        requests(seen).into_iter().filter(|r| r.starts_with("create")).last()
+        requests(seen).into_iter().rfind(|r| r.starts_with("create"))
     }
 
     #[test]
