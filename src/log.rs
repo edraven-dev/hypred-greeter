@@ -1,7 +1,8 @@
 //! Every line goes to stderr. A greeter's stderr is rarely the journal —
 //! Hyprland's exec hands its children /dev/null, greetd a VT — so unless it
-//! is, each line also goes to journald's native socket, and so does GLib's
-//! and GTK's output: the log does not depend on how the greeter was started.
+//! is, or under --demo, each line also goes to journald's native socket,
+//! and so do GLib's and GTK's messages: the log does not depend on how the
+//! greeter was started.
 
 use std::io::Write;
 use std::os::fd::AsFd;
