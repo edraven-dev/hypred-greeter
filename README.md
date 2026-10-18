@@ -404,13 +404,13 @@ possible later without breaking existing widgets.
   `[sessions] only`/`hide`/`order`/`names` make of the list is what every
   picker, `{session}` placeholder and the remembered-session lookup see.
 - **A layout must allow a login.** One without a `password` widget, or
-  whose `password` widget is not built (a bad property, or a container
-  around it that fails), is replaced by the built-in layout, with a banner
-  line saying why; so is one without a `username` widget, or whose
-  `username` widget is not built (a container around it that fails),
-  unless a username resolves (remembered, or `[auth] user`). `--demo`
-  skips this guard and shows the layout as it is; `--check` applies it, as
-  the login screen does.
+  whose `password` widget is not built (a bad property, or a parent that
+  fails to build or is no container), is replaced by the built-in layout,
+  with a banner line saying why; so is one without a `username` widget, or
+  whose `username` widget is not built (a parent that fails to build or is
+  no container), unless a username resolves (remembered, or
+  `[auth] user`). `--demo` skips this guard and shows the layout as it is;
+  `--check` applies it, as the login screen does.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
   transport failure, `101` panic; with `--check`, `0` nothing to report and
@@ -636,30 +636,40 @@ No 0.3 key or property is gone or renamed. What behaves differently:
   deprecations, a block's last declaration without `;` and an empty one
   (`;;`) are only logged.
 - **State classes.** `.hg-failed` also ends with a message widget's
-  `error-clear-ms`, no longer sticks after a stall, and an `animation:` on
-  it restarts on every failure, even one in the frame a re-arm or a
-  submission took the class off. `.hg-starting` is dropped by a failed
-  start, and under `--demo` stays until the next attempt so that a theme
-  can preview it; under greetd it lasts until the greeter exits, too short
-  for a transition to show.
+  `error-clear-ms` (after its 1.5 s hold), no longer sticks after a stall,
+  and an `animation:` on it restarts on every failure, even one in the
+  frame a re-arm or a submission took the class off. Under `--demo`,
+  `.hg-starting` stays until the next attempt, so that a theme can preview
+  it.
+- **An empty username** — Enter in the password entry with no name — sends
+  the focus to the `username` widget along with `[texts] enter-username`;
+  0.3 left it in the password entry.
+- **`prompt-placeholder`** keeps the widget's own placeholder for a prompt
+  a `[[texts.rewrite]]` rule dropped (0.3 showed none), and a re-arm puts
+  it back until the next prompt (0.3 kept the last prompt's text through
+  every re-armed cycle).
 - **A command that fails is reported**: a power, `button` or `[keys]`
   command that exits unsuccessfully within 10 s shows
   `[texts] power-failed`, with an `{error}` such as `exit status: 1`; 0.3
-  reported only one that could not start.
+  reported only one that could not start. A run less than 2 s after the
+  last of the same command reports nothing, not even a command that cannot
+  start, which 0.3 reported every time.
 - **A `password` widget that fails to build** (a bad property) makes the
   layout fall back to the built-in one, with a banner line — 0.3 left its
-  ⚠ placeholder and no way to type a password. So does a container that
-  fails around the `password` widget, or around the `username` widget
-  while no user is known. A `username` widget skips a property it cannot
-  use instead of failing.
+  ⚠ placeholder and no way to type a password. So does one that is never
+  built (its parent fails to build or is no container), and, while no user
+  is known, such a `username` widget. A `username` widget skips a property
+  it cannot use instead of failing.
 - **Label command output** keeps `{{` and `}}` as they are (0.3 made each
   one brace), and under `markup` a placeholder's value no longer fails the
   build check (`{time:%d & %m}`).
 
-New: `--check`; `[keys]`; `[auth] fixed-user`; `username` pickers
-(`style = "dropdown"` or `"buttons"`); `mask-visible` and `invisible-char`
-on `password`; the state classes `.hg-prompt-visible` and
-`.hg-fingerprint-locked`; `[texts] fingerprint-locked`.
+New: `--check`; `[keys]`; `[auth] fixed-user`, `fingerprint-misses` and
+`fingerprint-cooldown`; `username` pickers (`style = "dropdown"` or
+`"buttons"`, with `.hg-username-item`) and `.hg-username-fixed`;
+`mask-visible` and `invisible-char` on `password`; the state classes
+`.hg-prompt-visible` and `.hg-fingerprint-locked`;
+`[texts] fingerprint-locked`; the `--demo` user `miss`.
 
 ### From 0.2
 
