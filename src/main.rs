@@ -1,5 +1,6 @@
 //! Exit codes: 0 session started, 1 startup failure, 2 greetd transport
-//! failure, 101 panic; with --check 0 nothing to report, 1 problems.
+//! failure, 101 panic; with --check 0 nothing to report, 1 problems or no
+//! check at all.
 //! greetd starts the chosen session only after this process exits, so it
 //! must always exit.
 

@@ -344,7 +344,8 @@ possible later without breaking existing widgets.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
   transport failure, `101` panic; with `--check`, `0` nothing to report and
-  `1` problems.
+  `1` problems, or no check at all (no display, a bad argument: stderr says
+  which).
 
 ## Fingerprint (pam_fprintd)
 
