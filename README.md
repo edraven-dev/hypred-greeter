@@ -185,11 +185,12 @@ bottom, left]`), `width`/`height` (pixels, or a share of the window such as
 `"26%"`; sizing from the stylesheet with the `--hg-vw` variables is the way
 meant for themes — see style.css below), `visible`, `focus` (takes the
 focus once shown; without it the `username` widget gets it when no user is
-known, else the password), `focusable = false` (skipped by Tab and clicks —
-for a widget that must not take the focus from the entries). Unset, each is
-as GTK has it for that widget — `fill`, no margin, no size of its own,
-visible, focusable where it takes input — except that an `image` is
-centred.
+known — of several, the first entry, else the first picker, as after
+"enter a username" and for `focus-username` — else the password),
+`focusable = false` (skipped by Tab and clicks — for a widget that must
+not take the focus from the entries). Unset, each is as GTK has it for
+that widget — `fill`, no margin, no size of its own, visible, focusable
+where it takes input — except that an `image` is centred.
 
 `spacing` and `margin` given in TOML are floors the stylesheet only adds to;
 prefer `border-spacing` and `margin` in style.css, where a theme can change

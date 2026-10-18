@@ -221,7 +221,8 @@ fn login_possible(root: &Node, require_auth: bool, known_user: bool) -> Result<(
 }
 
 /// After the build: a widget the tree names may still be missing, a ⚠
-/// placeholder (a bad property) or never built (its container failed).
+/// placeholder (a bad property) or never built (a parent that failed or is
+/// no container).
 pub fn login_built(password: bool, username: bool, known_user: bool) -> Result<(), &'static str> {
     if !password {
         Err("the `password` widget failed to build")
