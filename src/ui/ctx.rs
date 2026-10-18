@@ -4,10 +4,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::actions::Runs;
 use crate::auth::Auth;
 use crate::config::Config;
 use crate::layout::{build, Node};
-use crate::ui::bus::{Bus, UiEvent};
+use crate::ui::bus::{Bus, FocusTarget, UiEvent};
 use crate::widgets::Registry;
 
 pub struct Shared {
@@ -61,6 +62,7 @@ pub struct AppHandle {
     pub auth: Rc<Auth>,
     pub bus: Rc<Bus>,
     pub shared: Rc<Shared>,
+    pub runs: Rc<Runs>,
     username_debounce: Duration,
     edit_debounce: Rc<Cell<Option<glib::SourceId>>>,
 }
@@ -72,7 +74,8 @@ impl AppHandle {
         shared: Rc<Shared>,
         username_debounce: Duration,
     ) -> Self {
-        Self { auth, bus, shared, username_debounce, edit_debounce: Rc::default() }
+        let (runs, edit_debounce) = (Rc::default(), Rc::default());
+        Self { auth, bus, shared, runs, username_debounce, edit_debounce }
     }
 
     pub fn username(&self) -> String {
@@ -85,6 +88,17 @@ impl AppHandle {
         if let Some(index) = self.shared.preselected_session() {
             self.select_session(index);
         }
+    }
+
+    /// A picker's choice: like Enter in the username entry, minus the wait
+    /// for typing to settle.
+    pub fn pick_user(&self, name: &str) {
+        if name == self.username() {
+            return;
+        }
+        self.set_username(name);
+        self.emit(&UiEvent::Focus(FocusTarget::Password));
+        self.auth.start_eager(name);
     }
 
     /// The selected session's display name; empty without sessions.
@@ -203,7 +217,7 @@ impl<'a> BuildCtx<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sessions::{Kind, Session};
     use crate::state::State;
@@ -242,7 +256,15 @@ mod tests {
 
     /// Runs `scenario` with a handle over `shared` and returns the events
     /// it caused, on a context of its own like the auth tests.
-    fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+    pub(crate) fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+        events_with(shared, &crate::config::Auth::default(), scenario)
+    }
+
+    fn events_with(
+        shared: Rc<Shared>,
+        options: &crate::config::Auth,
+        scenario: impl FnOnce(&AppHandle),
+    ) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         let acquired = context.with_thread_default(|| {
@@ -259,7 +281,7 @@ mod tests {
                 Box::new(crate::backend::DemoBackend::new()),
                 bus.clone(),
                 true,
-                &crate::config::Auth::default(),
+                options,
                 &crate::config::Texts::default(),
                 crate::auth::Hooks {
                     current_username: Box::new(String::new),
@@ -272,7 +294,8 @@ mod tests {
         });
         acquired.expect("test context must be acquirable");
         std::mem::forget(context);
-        Rc::try_unwrap(log).unwrap().into_inner()
+        // A command still running holds a handle, and through its bus the log.
+        log.take()
     }
 
     #[test]
@@ -294,6 +317,48 @@ mod tests {
         let changes = |locked| crate::ui::state_changes(&UiEvent::FingerprintLocked(locked));
         assert_eq!(changes(true), [("hg-fingerprint-locked", true)]);
         assert_eq!(changes(false), [("hg-fingerprint-locked", false)]);
+    }
+
+    #[test]
+    fn a_pick_moves_on_to_the_password_unless_its_name_is_shown() {
+        let mut state = State::default();
+        state.last_session.insert("touch".into(), "wayland/hyprland-uwsm".into());
+        let shared = Shared::new("fprint".into(), sessions(), state, None);
+        let log = events(shared, |app| {
+            app.pick_user("fprint");
+            app.pick_user("touch");
+            assert_eq!(app.username(), "touch");
+        });
+        assert_eq!(log, ["username touch", "session 1", "Focus(Password)"]);
+    }
+
+    #[test]
+    fn a_pick_opens_an_eager_conversation_for_the_name_picked() {
+        let shared = Shared::new("fprint".into(), sessions(), State::default(), None);
+        let eager = crate::config::Auth { eager: true, ..Default::default() };
+        let log = events_with(shared, &eager, |app| {
+            app.pick_user("fprint");
+            app.pick_user("touch");
+            let asked = Rc::new(Cell::new(false));
+            let flag = asked.clone();
+            app.bus
+                .subscribe(move |event| flag.set(flag.get() || matches!(event, UiEvent::Info(_))));
+            let context = glib::MainContext::ref_thread_default();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !asked.get() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+                while context.iteration(false) {}
+            }
+        });
+        assert_eq!(
+            log,
+            [
+                "username touch",
+                "Focus(Password)",
+                "Armed(true)",
+                "Info(\"Place your right thumb on the fingerprint reader\")",
+            ]
+        );
     }
 
     #[test]

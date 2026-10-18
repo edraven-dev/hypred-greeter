@@ -5,105 +5,30 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::config::{Commands, Texts};
+use crate::actions::Action;
+use crate::config::Commands;
 use crate::layout::Node;
-use crate::ui::bus::{FocusTarget, UiEvent};
-use crate::ui::ctx::{AppHandle, BuildCtx};
+use crate::ui::ctx::BuildCtx;
 use crate::widgets::{image, WidgetDef, WidgetError};
 
 /// A `confirm` button stays armed this long.
 const CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 
-const BUILT_IN: &str = "cancel, next-session, prev-session, focus-username, focus-password";
-
 pub struct ButtonDef;
 
-#[derive(Debug, PartialEq, Eq)]
-enum Action {
-    Cancel,
-    NextSession,
-    PrevSession,
-    Focus(FocusTarget),
-    Run(Vec<String>),
-}
-
-impl Action {
-    fn parse(node: &Node, commands: &Commands) -> Result<Self, WidgetError> {
-        let (action, command) = (node.props.str("action")?, node.props.str_list("command")?);
-        match (action, command) {
-            (Some(_), Some(_)) => {
-                Err(WidgetError::Other("`action` and `command` exclude each other".into()))
-            }
-            (None, None) => {
-                Err(WidgetError::Other("one of `action` or `command` is required".into()))
-            }
-            (None, Some(argv)) if argv.is_empty() => {
-                Err(WidgetError::Other("`command` must not be empty".into()))
-            }
-            (None, Some(argv)) => Ok(Action::Run(argv)),
-            (Some(name), None) => Self::named(&name, commands),
+fn parse(node: &Node, commands: &Commands) -> Result<Action, WidgetError> {
+    let (action, command) = (node.props.str("action")?, node.props.str_list("command")?);
+    match (action, command) {
+        (Some(_), Some(_)) => {
+            Err(WidgetError::Other("`action` and `command` exclude each other".into()))
         }
-    }
-
-    fn named(name: &str, commands: &Commands) -> Result<Self, WidgetError> {
-        Ok(match name {
-            "cancel" => Action::Cancel,
-            "next-session" => Action::NextSession,
-            "prev-session" => Action::PrevSession,
-            "focus-username" => Action::Focus(FocusTarget::Username),
-            "focus-password" => Action::Focus(FocusTarget::Password),
-            _ => match commands.get(name) {
-                Some([]) => {
-                    return Err(WidgetError::Other(format!("`action`: command `{name}` is empty")))
-                }
-                Some(argv) => Action::Run(argv.to_vec()),
-                None => {
-                    return Err(WidgetError::Other(format!(
-                        "`action`: unknown action `{name}` (built-in: {BUILT_IN}; or a [commands] name)"
-                    )))
-                }
-            },
-        })
-    }
-
-    fn perform(&self, app: &AppHandle, demo: bool, texts: &Texts) {
-        match self {
-            Action::Cancel => app.auth.cancel(),
-            Action::NextSession => app.step_session(1),
-            Action::PrevSession => app.step_session(-1),
-            Action::Focus(target) => app.emit(&UiEvent::Focus(*target)),
-            Action::Run(argv) => run(app, demo, texts, argv),
+        (None, None) => Err(WidgetError::Other("one of `action` or `command` is required".into())),
+        (None, Some(argv)) if argv.is_empty() => {
+            Err(WidgetError::Other("`command` must not be empty".into()))
         }
-    }
-}
-
-/// The one place a configured command is started from.
-fn run(app: &AppHandle, demo: bool, texts: &Texts, argv: &[String]) {
-    let Some((program, args)) = argv.split_first() else { return };
-    if demo {
-        app.emit(&UiEvent::Info(format!("demo: would run {}", argv.join(" "))));
-        return;
-    }
-    let spawned = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .env_remove("GREETD_SOCK")
-        .spawn();
-    match spawned {
-        // Reaped off the main thread: a dropped Child stays a zombie.
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        // A PamError: an AuthError would wipe a half-typed password.
-        Err(err) => {
-            let text = texts
-                .power_failed
-                .replace("{program}", program)
-                .replace("{error}", &err.to_string());
-            app.emit(&UiEvent::PamError(text));
-        }
+        (None, Some(argv)) => Ok(Action::Run(argv)),
+        (Some(name), None) => Action::named(&name, commands)
+            .map_err(|why| WidgetError::Other(format!("`action`: {why}"))),
     }
 }
 
@@ -113,7 +38,7 @@ impl WidgetDef for ButtonDef {
     }
 
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-        let action = Action::parse(node, &ctx.config.commands)?;
+        let action = parse(node, &ctx.config.commands)?;
         let button = gtk::Button::new();
         match (node.props.str("icon")?, node.props.str("label")?) {
             (Some(icon), Some(text)) => {
@@ -170,6 +95,7 @@ impl WidgetDef for ButtonDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::bus::FocusTarget;
 
     fn node(props: &str) -> Node {
         let text = format!("[root]\nwidget = \"button\"\n{props}\n");
@@ -183,16 +109,16 @@ mod tests {
     #[test]
     fn an_action_is_built_in_a_commands_name_or_an_argv() {
         let commands = Commands::default();
-        let parse = |props: &str| Action::parse(&node(props), &commands);
-        assert_eq!(parse("action = \"cancel\"").unwrap(), Action::Cancel);
-        assert_eq!(parse("action = \"next-session\"").unwrap(), Action::NextSession);
-        assert_eq!(parse("action = \"prev-session\"").unwrap(), Action::PrevSession);
+        let action = |props: &str| parse(&node(props), &commands);
+        assert_eq!(action("action = \"cancel\"").unwrap(), Action::Cancel);
+        assert_eq!(action("action = \"next-session\"").unwrap(), Action::NextSession);
+        assert_eq!(action("action = \"prev-session\"").unwrap(), Action::PrevSession);
         let focus = Action::Focus(FocusTarget::Password);
-        assert_eq!(parse("action = \"focus-password\"").unwrap(), focus);
+        assert_eq!(action("action = \"focus-password\"").unwrap(), focus);
         let reboot = Action::Run(argv(&["systemctl", "reboot"]));
-        assert_eq!(parse("action = \"reboot\"").unwrap(), reboot);
+        assert_eq!(action("action = \"reboot\"").unwrap(), reboot);
         let suspend = Action::Run(argv(&["systemctl", "suspend"]));
-        assert_eq!(parse("command = [\"systemctl\", \"suspend\"]").unwrap(), suspend);
+        assert_eq!(action("command = [\"systemctl\", \"suspend\"]").unwrap(), suspend);
     }
 
     #[test]
@@ -207,10 +133,10 @@ mod tests {
             ("command = []", "must not be empty"),
             ("command = \"systemctl suspend\"", "an array of strings"),
         ] {
-            let err = Action::parse(&node(bad), &commands).unwrap_err().to_string();
+            let err = parse(&node(bad), &commands).unwrap_err().to_string();
             assert!(err.contains(fragment), "{bad}: {err}");
         }
-        let err = Action::parse(&node("action = \"nope\""), &commands).unwrap_err().to_string();
+        let err = parse(&node("action = \"nope\""), &commands).unwrap_err().to_string();
         assert!(err.contains("unknown action `nope`") && err.contains("next-session"), "{err}");
     }
 }

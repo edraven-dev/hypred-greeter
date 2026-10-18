@@ -13,6 +13,7 @@ pub struct Config {
     pub gtk: Gtk,
     pub auth: Auth,
     pub commands: Commands,
+    pub keys: Keys,
     pub sessions: Sessions,
     pub texts: Texts,
 }
@@ -79,6 +80,7 @@ pub struct Auth {
     pub rearm_window: Rearm,
     /// The username shown when nothing is remembered.
     pub user: Option<String>,
+    pub fixed_user: bool,
     /// Seconds text left in the password entry keeps a parked prompt ready
     /// after the last input — a stray key must not switch the reader off.
     pub typing_hold: u64,
@@ -97,11 +99,22 @@ impl Default for Auth {
             eager: false,
             rearm_window: Rearm::Never,
             user: None,
+            fixed_user: false,
             typing_hold: 30,
             username_debounce_ms: 400,
             fingerprint_misses: 9,
             fingerprint_cooldown: 600,
         }
+    }
+}
+
+impl Auth {
+    fn problems(&mut self) -> Vec<String> {
+        if self.fixed_user && self.user.as_deref().is_none_or(str::is_empty) {
+            self.fixed_user = false;
+            return vec!["`auth.fixed-user` pins `auth.user`, which is not set; ignored".into()];
+        }
+        Vec::new()
     }
 }
 
@@ -175,6 +188,36 @@ impl<'de> Deserialize<'de> for Commands {
         let mut commands = Self::default();
         commands.0.extend(HashMap::<String, Vec<String>>::deserialize(deserializer)?);
         Ok(commands)
+    }
+}
+
+/// `[keys]`: accelerator as GTK reads it → action name, in file order (toml
+/// keeps it with `preserve_order`), so of two spellings of one key the
+/// first written wins.
+#[derive(Debug, Default)]
+pub struct Keys(pub Vec<(String, String)>);
+
+impl<'de> Deserialize<'de> for Keys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Keys;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a table of \"key\" = \"action\"")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    keys.push(entry);
+                }
+                Ok(Keys(keys))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
     }
 }
 
@@ -360,15 +403,14 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
     };
 
     let config = match parse(&text) {
-        Ok((config, unknown)) => {
+        Ok((mut config, unknown)) => {
             // A misspelt key silently leaves its default in force
             // (`rearm_window` would switch re-arming off): say so on screen.
             problems.extend(
                 unknown.iter().map(|key| format!("config {}: unknown key `{key}`", path.display())),
             );
-            problems.extend(
-                config.texts.problems().iter().map(|p| format!("config {}: {p}", path.display())),
-            );
+            let found = config.texts.problems().into_iter().chain(config.auth.problems());
+            problems.extend(found.map(|p| format!("config {}: {p}", path.display())));
             config
         }
         Err(err) => {
@@ -409,6 +451,12 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_config_names_only_known_keys() {
+        let (_, unknown) = parse(include_str!("../data/config.toml")).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
     fn a_commands_table_adds_and_overrides_but_keeps_the_rest() {
         let text = "[commands]\nsuspend = [\"systemctl\", \"suspend\"]\nreboot = [\"loginctl\", \"reboot\"]\n";
         let (config, unknown) = parse(text).unwrap();
@@ -424,6 +472,37 @@ mod tests {
         assert_eq!(parse("").unwrap().0.auth.user, None);
         let config = parse("[auth]\nuser = \"edraven\"\n").unwrap().0;
         assert_eq!(config.auth.user.as_deref(), Some("edraven"));
+    }
+
+    #[test]
+    fn fixed_user_pins_only_a_configured_user() {
+        let mut auth = parse("[auth]\nuser = \"edraven\"\nfixed-user = true\n").unwrap().0.auth;
+        assert!(auth.problems().is_empty());
+        assert!(auth.fixed_user);
+        assert!(!parse("").unwrap().0.auth.fixed_user);
+        for unset in ["[auth]\nfixed-user = true\n", "[auth]\nuser = \"\"\nfixed-user = true\n"] {
+            let mut auth = parse(unset).unwrap().0.auth;
+            let problems = auth.problems();
+            assert_eq!(problems.len(), 1, "{unset}: {problems:?}");
+            assert!(problems[0].starts_with("`auth.fixed-user` pins `auth.user`"), "{problems:?}");
+            assert!(!auth.fixed_user, "{unset}");
+        }
+    }
+
+    #[test]
+    fn keys_keep_their_accelerators_verbatim_and_in_file_order() {
+        let text = "[keys]\n\"<Super>s\" = \"suspend\"\n\"<Control><Alt>Delete\" = \"reboot\"\n\
+                    F2 = \"next-session\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let keys: Vec<(&str, &str)> =
+            config.keys.0.iter().map(|(key, action)| (key.as_str(), action.as_str())).collect();
+        assert_eq!(
+            keys,
+            [("<Super>s", "suspend"), ("<Control><Alt>Delete", "reboot"), ("F2", "next-session")]
+        );
+        assert!(parse("").unwrap().0.keys.0.is_empty());
+        assert!(parse("[keys]\nF2 = 2\n").is_err());
     }
 
     #[test]

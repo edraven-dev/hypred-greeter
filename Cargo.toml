@@ -12,7 +12,7 @@ gtk4 = { version = "0.11", features = ["v4_12"] }
 glib = { version = "0.22", features = ["v2_68"] }
 greetd_ipc = { version = "0.10", features = ["sync-codec"] }
 serde = { version = "1", features = ["derive"] }
-toml = "1"
+toml = { version = "1", features = ["preserve_order"] }
 shlex = "2"
 async-channel = "2"
 serde_ignored = "0.1.14"

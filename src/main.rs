@@ -4,6 +4,7 @@
 //! greetd starts the chosen session only after this process exits, so it
 //! must always exit.
 
+mod actions;
 mod auth;
 mod backend;
 mod cli;
@@ -15,6 +16,7 @@ mod seat;
 mod sessions;
 mod state;
 mod ui;
+mod users;
 mod widgets;
 
 use gtk4 as gtk;
@@ -33,7 +35,7 @@ fn main() {
     }));
 
     let args = cli::parse();
-    log::init(args.demo);
+    log::init(args.demo || args.check);
 
     if args.greetd() && std::env::var_os("GREETD_SOCK").is_none() {
         log::error!("GREETD_SOCK is not set; run under greetd, or pass --demo or --check");
@@ -62,12 +64,9 @@ fn main() {
         problems.extend(ui::css_lines(css, args.check));
 
         let saved = if args.reads_state() { state::load() } else { state::State::default() };
-        let initial_username = saved
-            .last_user
-            .clone()
-            .or_else(|| loaded.config.auth.user.clone())
-            .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
-            .unwrap_or_default();
+        let demo_user = if args.demo { std::env::var("USER").ok() } else { None };
+        let initial_username =
+            users::initial(saved.last_user.as_deref(), &loaded.config.auth, demo_user.as_deref());
 
         let layout_path = loaded.resolve(args.layout.as_deref(), &loaded.config.paths.layout);
         let layout = layout::load(&layout_path, !args.demo, !initial_username.is_empty());
@@ -166,6 +165,7 @@ fn main() {
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
         let focus_placed = layout::requests_focus(&layout.root);
+        let shortcuts = actions::shortcuts(&loaded.config, &handle, args.demo, &mut problems);
 
         // Every problem source comes before this: --check ends here.
         if args.check {
@@ -210,6 +210,12 @@ fn main() {
         }
         window.present();
 
+        // GTK runs the controller added last first, and a key a shortcut
+        // takes goes no further: the activity watcher is added after these,
+        // so a bound key still counts as input.
+        for controller in shortcuts {
+            window.add_controller(controller);
+        }
         // Capture phase: sees every key/pointer event before a child can
         // stop it.
         let activity = gtk::EventControllerLegacy::new();

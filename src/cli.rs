@@ -8,8 +8,8 @@ usage: hypred-greeter [options]
   --style <path>    CSS file instead of the config's [paths].style
                     (a relative --layout/--style is taken from the current
                     directory, a relative [paths] value from the config's)
-  --demo            windowed demo mode: fake auth; power/button commands are
-                    announced, not run (label commands do run)
+  --demo            windowed demo mode: fake auth; power, button and [keys]
+                    commands are announced, not run (label commands do run)
   --check           load config, style and layout as a first start under
                     greetd would (no remembered user) and build the widgets
                     (no window, no greetd, no label commands); print every

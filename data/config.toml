@@ -40,6 +40,9 @@ rearm-window = 0
 # The username shown when nothing is remembered yet (a layout without a
 # `username` widget needs one).
 # user = "edraven"
+# Always `user`, even over a remembered one: the username widget turns
+# read-only (a picker disabled). Without `user` it is ignored.
+fixed-user = false
 # Text left in the password entry keeps a parked prompt ready (no re-arm)
 # for this many seconds after the last input.
 typing-hold = 30
@@ -63,6 +66,16 @@ fingerprint-cooldown = 600
 reboot = ["systemctl", "reboot"]
 poweroff = ["systemctl", "poweroff"]
 # suspend = ["systemctl", "suspend"]
+
+[keys]
+# A key as GTK writes it → an action, named as a `button` names it: cancel,
+# next-session, prev-session, focus-username, focus-password, or a
+# [commands] name. Works whatever widget has the focus, but not while a
+# dropdown's list or a right-click menu is open; a key an entry takes as
+# input (a character, Enter, Tab, Backspace, Delete, Escape) needs
+# <Control>, <Alt> or <Super>. Held down, a key runs its command once.
+# "<Control><Alt>Delete" = "reboot"
+# F2 = "next-session"
 
 [sessions]
 # Prepended to the Exec of X11 sessions (from xsessions/ dirs).
@@ -89,6 +102,9 @@ x11-suffix = " (X11)"
 enter-username = "enter a username"
 username-changed = "username changed — enter the password again"
 auth-failed = "authentication failed"
+# A power, button or [keys] command that cannot start, or exits
+# unsuccessfully within 10 s ({error} is then "exit status: 1", say); not
+# for a run less than 2 s after the last of the same command.
 power-failed = "{program}: {error}"
 # Shown during a fingerprint cool-down ([auth] fingerprint-misses), and for
 # a login refused in one.
