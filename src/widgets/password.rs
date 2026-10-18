@@ -149,19 +149,22 @@ fn invisible_char(node: &Node) -> Result<Option<char>, WidgetError> {
 /// With `mask-visible = false`: whether the entry shows its text in clear
 /// after `event`, `unmasked` saying a visible prompt made it do so; `None`
 /// leaves it as it is. The answer to a visible prompt is shown until that
-/// prompt ends; text the peek icon revealed is the user's and stays.
+/// prompt ends (a re-arm ends a parked one with nothing but `Armed`, and a
+/// password typed during the next fingerprint wait must not show); text
+/// the peek icon revealed is the user's and stays.
 fn in_clear(event: &UiEvent, unmasked: bool) -> Option<bool> {
     match event {
         UiEvent::Prompt { secret: false, .. } => Some(true),
-        UiEvent::Prompt { secret: true, .. } | UiEvent::Busy(true) | UiEvent::AuthError(_) => {
-            unmasked.then_some(false)
-        }
+        UiEvent::Prompt { secret: true, .. }
+        | UiEvent::Busy(true)
+        | UiEvent::AuthError(_)
+        | UiEvent::Armed(true) => unmasked.then_some(false),
         UiEvent::Info(text) if text.is_empty() => unmasked.then_some(false),
         UiEvent::Info(_)
         | UiEvent::Busy(false)
         | UiEvent::PamError(_)
         | UiEvent::SessionChanged(_)
-        | UiEvent::Armed(_)
+        | UiEvent::Armed(false)
         | UiEvent::Starting
         | UiEvent::Focus(_)
         | UiEvent::UsernameChanged(_) => None,
@@ -204,6 +207,7 @@ mod tests {
             UiEvent::Busy(true),
             UiEvent::AuthError("demo: wrong password".into()),
             UiEvent::Info(String::new()),
+            UiEvent::Armed(true),
         ];
         for event in &ends {
             assert_eq!(in_clear(event, true), Some(false), "{event:?}");
@@ -213,7 +217,7 @@ mod tests {
             UiEvent::Info("demo: any token accepted".into()),
             UiEvent::Busy(false),
             UiEvent::PamError("Failed to match fingerprint".into()),
-            UiEvent::Armed(true),
+            UiEvent::Armed(false),
             UiEvent::Starting,
             UiEvent::Focus(FocusTarget::Password),
             UiEvent::SessionChanged(0),

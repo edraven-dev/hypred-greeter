@@ -211,7 +211,9 @@ fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
             vec![("hg-failed", false), ("hg-info", false), ("hg-prompt-visible", false)]
         }
         UiEvent::Info(text) => vec![("hg-failed", false), ("hg-info", !text.is_empty())],
-        UiEvent::Armed(true) => vec![("hg-armed", true), ("hg-failed", false)],
+        UiEvent::Armed(true) => {
+            vec![("hg-armed", true), ("hg-failed", false), ("hg-prompt-visible", false)]
+        }
         UiEvent::Armed(false) => vec![("hg-armed", false)],
         UiEvent::Starting => vec![("hg-starting", true)],
         UiEvent::SessionChanged(_) | UiEvent::Focus(_) | UiEvent::UsernameChanged(_) => Vec::new(),
@@ -367,13 +369,14 @@ mod tests {
             UiEvent::AuthError("no".into()),
             UiEvent::PamError("no".into()),
             UiEvent::Info(String::new()),
+            // A re-arm leaves a parked prompt with no other event.
+            UiEvent::Armed(true),
         ] {
             assert_eq!(on(&ends), Some(false), "{ends:?}");
         }
         for leaves in [
             UiEvent::Info("demo: any token accepted".into()),
             UiEvent::Busy(false),
-            UiEvent::Armed(true),
             UiEvent::Armed(false),
             UiEvent::Starting,
             UiEvent::Focus(FocusTarget::Password),
