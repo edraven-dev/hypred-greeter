@@ -201,9 +201,12 @@ fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
             vec![("hg-busy", true), ("hg-failed", false), ("hg-prompt-visible", false)]
         }
         UiEvent::Busy(false) => vec![("hg-busy", false), ("hg-starting", false)],
-        UiEvent::AuthError(_) | UiEvent::PamError(_) => {
+        UiEvent::AuthError(_) => {
             vec![("hg-failed", true), ("hg-info", false), ("hg-prompt-visible", false)]
         }
+        // PAM sends no error while a prompt waits; one of the greeter's own
+        // (a failed command) leaves a visible prompt pending.
+        UiEvent::PamError(_) => vec![("hg-failed", true), ("hg-info", false)],
         UiEvent::Prompt { secret, .. } => {
             vec![("hg-failed", false), ("hg-info", false), ("hg-prompt-visible", !secret)]
         }
@@ -367,7 +370,6 @@ mod tests {
             prompt(true, true),
             UiEvent::Busy(true),
             UiEvent::AuthError("no".into()),
-            UiEvent::PamError("no".into()),
             UiEvent::Info(String::new()),
             // A re-arm leaves a parked prompt with no other event.
             UiEvent::Armed(true),
@@ -375,6 +377,7 @@ mod tests {
             assert_eq!(on(&ends), Some(false), "{ends:?}");
         }
         for leaves in [
+            UiEvent::PamError("could not run poweroff".into()),
             UiEvent::Info("demo: any token accepted".into()),
             UiEvent::Busy(false),
             UiEvent::Armed(false),
