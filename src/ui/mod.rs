@@ -312,8 +312,10 @@ pub fn apply_gtk_settings(cfg: &config::Gtk) {
     if let Some(dark) = dark_scheme(cfg) {
         set_color_scheme(&settings, dark);
     }
-    if let Some(theme) = &cfg.theme {
-        settings.set_gtk_theme_name(Some(theme));
+    match theme_change(cfg) {
+        Theme::Set(theme) => settings.set_gtk_theme_name(Some(theme)),
+        Theme::Reload => settings.set_gtk_theme_name(settings.gtk_theme_name().as_deref()),
+        Theme::Keep => {}
     }
     if let Some(icons) = &cfg.icon_theme {
         settings.set_gtk_icon_theme_name(Some(icons));
@@ -334,6 +336,26 @@ fn dark_scheme(cfg: &config::Gtk) -> Option<bool> {
         return Some(false);
     }
     cfg.dark
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Theme<'a> {
+    Keep,
+    Set(&'a str),
+    /// The theme in force, set again.
+    Reload,
+}
+
+/// With `dark` alone the theme in force is set again: from GTK 4.23 a
+/// scheme change only re-renders the theme already loaded, and a theme
+/// with a gtk-dark.css of its own (no media queries) keeps the variant it
+/// was loaded with until a theme name is set.
+fn theme_change(cfg: &config::Gtk) -> Theme<'_> {
+    match (&cfg.theme, cfg.dark) {
+        (Some(theme), _) => Theme::Set(theme),
+        (None, Some(_)) => Theme::Reload,
+        (None, None) => Theme::Keep,
+    }
 }
 
 /// gtk-interface-color-scheme (GTK 4.20) is looked up at runtime: the
@@ -397,19 +419,27 @@ mod tests {
         assert_eq!(capped(lines[..5].to_vec(), 5), lines[..5]);
     }
 
+    fn gtk(dark: Option<bool>, theme: Option<&str>) -> config::Gtk {
+        config::Gtk { dark, theme: theme.map(Into::into), ..Default::default() }
+    }
+
     #[test]
     fn the_empty_theme_is_always_light() {
-        let gtk = |dark: Option<bool>, theme: Option<&str>| config::Gtk {
-            dark,
-            theme: theme.map(Into::into),
-            ..Default::default()
-        };
         assert_eq!(dark_scheme(&gtk(Some(true), Some("Empty"))), Some(false));
         assert_eq!(dark_scheme(&gtk(None, Some("Empty"))), Some(false));
         assert_eq!(dark_scheme(&gtk(Some(true), Some("adw-gtk3-dark"))), Some(true));
         assert_eq!(dark_scheme(&gtk(Some(false), Some("Default"))), Some(false));
         assert_eq!(dark_scheme(&gtk(Some(true), None)), Some(true));
         assert_eq!(dark_scheme(&gtk(None, Some("adw-gtk3"))), None);
+    }
+
+    #[test]
+    fn dark_alone_sets_the_theme_in_force_again() {
+        assert_eq!(theme_change(&gtk(Some(true), None)), Theme::Reload);
+        assert_eq!(theme_change(&gtk(Some(false), None)), Theme::Reload);
+        assert_eq!(theme_change(&gtk(None, None)), Theme::Keep);
+        assert_eq!(theme_change(&gtk(Some(true), Some("Split"))), Theme::Set("Split"));
+        assert_eq!(theme_change(&gtk(None, Some("Empty"))), Theme::Set("Empty"));
     }
 
     fn ms(millis: u64) -> Duration {
