@@ -59,18 +59,18 @@ const MISSED: &str = "Failed to match fingerprint";
 /// pam_fprintd before fprintd is waited out.
 const INSTANT_PARKS: u32 = 3;
 /// fprintd exits 30 s after its last client; the next one starts clean.
+/// A GLib timer, like fprintd's own: a suspend pauses both.
 const WAIT_OUT: Duration = Duration::from_secs(31);
-const SLEEP_PIECE: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often a cool-down looks at the boot clock: a GLib timer stands
+/// still through a suspend, the cool-down's seconds do not.
+const COOLDOWN_CHECK: Duration = Duration::from_secs(1);
 
-/// A GLib timeout is u32 milliseconds (49.7 days): a longer wait would
-/// wrap to a short one, so it is slept in pieces.
-async fn sleep(total: Duration, piece: Duration) {
-    let mut left = total;
-    while !left.is_zero() {
-        let step = left.min(piece);
-        glib::timeout_future(step).await;
-        left -= step;
-    }
+/// Time since boot, a suspend included; Instant does not count one.
+fn boot_clock() -> Duration {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes only the timespec it is handed.
+    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+    Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
 /// Gets the authenticated user; returns the session's (cmd, env).
@@ -133,9 +133,13 @@ pub struct Auth {
     seat_waiting: Cell<bool>,
     miss_cap: u32,
     cooldown: Cell<Duration>,
-    /// When the misses still remembered came, oldest first.
-    misses: RefCell<VecDeque<Instant>>,
-    cooling: Cell<bool>,
+    cooldown_check: Cell<Duration>,
+    clock: Cell<fn() -> Duration>,
+    /// When the misses still remembered came, on the boot clock, oldest
+    /// first.
+    misses: RefCell<VecDeque<Duration>>,
+    /// Through a cool-down: when it ends, on the boot clock.
+    cool_until: Cell<Option<Duration>>,
     /// The cool-down text is the last thing shown, as far as auth can tell.
     cooling_shown: Cell<bool>,
     /// Whose passive conversations parked without a fingerprint wait, and
@@ -190,8 +194,10 @@ impl Auth {
             seat_waiting: Cell::new(false),
             miss_cap: options.fingerprint_misses,
             cooldown: Cell::new(Duration::from_secs(options.fingerprint_cooldown)),
+            cooldown_check: Cell::new(COOLDOWN_CHECK),
+            clock: Cell::new(boot_clock),
             misses: RefCell::default(),
-            cooling: Cell::new(false),
+            cool_until: Cell::new(None),
             cooling_shown: Cell::new(false),
             instant_parks: RefCell::default(),
             wait_out: Cell::new(WAIT_OUT),
@@ -363,7 +369,7 @@ impl Auth {
     /// Armed: a passive conversation waits on the module with nothing
     /// submitted — a touch alone would log in. Told once per change.
     fn sync_armed(&self) {
-        let armed = !self.cooling.get()
+        let armed = !self.cooling()
             && matches!(
                 *self.phase.borrow(),
                 Phase::Conversing { passive: true, awaiting_input: false, .. }
@@ -730,7 +736,7 @@ impl Auth {
             self.note_park(user, cycled);
             // Whatever cooling_shown says: a message widget may show the
             // prompt over it.
-            if self.cooling.get() {
+            if self.cooling() {
                 self.say_cooling();
             }
             self.maybe_rearm();
@@ -780,7 +786,11 @@ impl Auth {
     /// cool-down and while fprintd is waited out. A parked prompt stays
     /// parked, ready for a password.
     fn held(&self) -> bool {
-        self.cooling.get() || self.waiting_out.get()
+        self.cooling() || self.waiting_out.get()
+    }
+
+    fn cooling(&self) -> bool {
+        self.cool_until.get().is_some()
     }
 
     fn release(&self) {
@@ -798,12 +808,12 @@ impl Auth {
     /// when this one reaches the cap. One during a cool-down is not counted.
     fn count_miss(&self) -> bool {
         let window = self.cooldown.get();
-        if self.miss_cap == 0 || window.is_zero() || self.cooling.get() {
+        if self.miss_cap == 0 || window.is_zero() || self.cooling() {
             return false;
         }
-        let now = Instant::now();
+        let now = self.clock.get()();
         let mut misses = self.misses.borrow_mut();
-        misses.retain(|at| now.duration_since(*at) < window);
+        misses.retain(|at| now.saturating_sub(*at) < window);
         misses.push_back(now);
         let (count, cap) = (misses.len(), self.miss_cap);
         info!("fingerprint did not match: {count} of {cap} within {} s", window.as_secs());
@@ -814,12 +824,11 @@ impl Auth {
         let cooldown = self.cooldown.get();
         let seconds = cooldown.as_secs();
         warn_!("fingerprint cool-down for {seconds} s: no arming, no login without a password");
-        self.cooling.set(true);
+        self.cool_until.set(Some(self.clock.get()().saturating_add(cooldown)));
         let me = self.me.clone();
         glib::spawn_future_local(async move {
-            sleep(cooldown, SLEEP_PIECE).await;
-            if let Some(auth) = me.upgrade() {
-                auth.end_cooldown();
+            while let Some(wait) = me.upgrade().and_then(|auth| auth.cooldown_wait()) {
+                glib::timeout_future(wait).await;
             }
         });
         self.emit(UiEvent::FingerprintLocked(true));
@@ -827,8 +836,20 @@ impl Auth {
         self.say_cooling();
     }
 
+    /// How long to wait before the boot clock is looked at again; `None`
+    /// once the cool-down is over, which this ends when its time has come.
+    fn cooldown_wait(&self) -> Option<Duration> {
+        let left = self.cool_until.get()?.saturating_sub(self.clock.get()());
+        if left.is_zero() {
+            self.end_cooldown();
+            return None;
+        }
+        // GLib counts whole milliseconds: less than one would be no wait.
+        Some(left.min(self.cooldown_check.get()).max(Duration::from_millis(1)))
+    }
+
     fn end_cooldown(&self) {
-        self.cooling.set(false);
+        self.cool_until.set(None);
         info!("fingerprint cool-down over");
         self.emit(UiEvent::FingerprintLocked(false));
         if self.cooling_shown.get() {
@@ -845,7 +866,7 @@ impl Auth {
 
     /// Shown again where the greeter would have armed the reader.
     fn remind_cooling(&self) {
-        if self.cooling.get() && !self.cooling_shown.get() {
+        if self.cooling() && !self.cooling_shown.get() {
             self.say_cooling();
         }
     }
@@ -885,7 +906,7 @@ impl Auth {
                     self.pending_rearm.set(true);
                     return self.wait_for_seat();
                 }
-                if self.cooling.get() && !answered_secret {
+                if self.cooling() && !answered_secret {
                     warn_!("fingerprint cool-down: refused a login no password was answered in");
                     self.abandon_conversation();
                     match stash {
@@ -954,6 +975,11 @@ impl Auth {
     }
 
     #[cfg(test)]
+    fn set_cooldown_check(&self, check: Duration) {
+        self.cooldown_check.set(check);
+    }
+
+    #[cfg(test)]
     fn set_wait_out(&self, wait_out: Duration) {
         self.wait_out.set(wait_out);
     }
@@ -998,6 +1024,18 @@ mod tests {
     thread_local! {
         static SHOWN: RefCell<String> = const { RefCell::new(String::new()) };
         static ON_SCREEN: Cell<bool> = const { Cell::new(true) };
+        static SLEPT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    /// The boot clock with every suspend() so far in it.
+    fn slept_clock() -> Duration {
+        boot_clock() + SLEPT.with(Cell::get)
+    }
+
+    /// What a suspend this long does: the boot clock moves on, every GLib
+    /// timer and Instant stands still.
+    fn suspend(by: Duration) {
+        SLEPT.with(|slept| slept.set(slept.get() + by));
     }
 
     fn on_screen(active: bool) {
@@ -1026,6 +1064,7 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
         show("edraven");
         on_screen(true);
+        SLEPT.with(|slept| slept.set(Duration::ZERO));
         let acquired = context.with_thread_default(|| {
             let bus = Rc::new(Bus::default());
             let sink = log.clone();
@@ -1060,6 +1099,7 @@ mod tests {
                     seat_active: Box::new(|| ON_SCREEN.with(|seat| seat.get())),
                 },
             );
+            auth.clock.set(slept_clock);
             let pump = || {
                 for _ in 0..50 {
                     std::thread::sleep(Duration::from_millis(1));
@@ -2789,18 +2829,21 @@ mod tests {
         assert_eq!(positions(&log, "locked true"), [misses[2] + 1], "{log:?}");
     }
 
+    /// A miss, then one more once the gate is released.
+    fn two_misses_apart(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Wait,
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
     #[test]
     fn misses_older_than_the_cooldown_are_forgotten() {
-        let (backend, seen, gate) = scripted(|_| {
-            vec![
-                Step::Msg(Info, "Place your finger"),
-                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
-                Step::Msg(Info, "Place your finger"),
-                Step::Wait,
-                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
-                Step::Msg(Secret, "Password:"),
-            ]
-        });
+        let (backend, seen, gate) = scripted(two_misses_apart);
         let log = drive_with(backend, capped(2), |auth, pump| {
             auth.set_cooldown(Duration::from_millis(200));
             auth.start_eager("edraven");
@@ -2818,11 +2861,55 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_longer_than_a_piece_is_slept_in_full() {
-        let context = glib::MainContext::new();
-        let started = Instant::now();
-        context.block_on(sleep(Duration::from_millis(150), Duration::from_millis(40)));
-        assert!(started.elapsed() >= Duration::from_millis(150), "{:?}", started.elapsed());
+    fn a_suspend_ages_the_misses() {
+        let cooldown = Duration::from_secs(600);
+        for (asleep, locked) in [(cooldown - Duration::from_secs(1), true), (cooldown, false)] {
+            let (backend, _, gate) = scripted(two_misses_apart);
+            let log = drive_with(backend, capped(2), |auth, pump| {
+                auth.set_cooldown(cooldown);
+                auth.start_eager("edraven");
+                pump();
+                suspend(asleep);
+                gate.release();
+                pump();
+            });
+            assert_eq!(count(&log, MISS_SHOWN), 2, "{log:?}");
+            assert_eq!(log.contains(&"locked true".to_string()), locked, "{asleep:?}: {log:?}");
+        }
+    }
+
+    #[test]
+    fn a_suspend_counts_toward_the_cooldown() {
+        let (backend, _, _) = scripted(three_no_matches);
+        let options = config::Auth { fingerprint_misses: 2, ..eager(0) };
+        let log = drive_with(backend, options, |auth, pump| {
+            auth.set_cooldown(Duration::from_secs(600));
+            auth.set_cooldown_check(FAST);
+            auth.start_eager("edraven");
+            pump();
+            suspend(Duration::from_secs(599));
+            pump();
+            assert!(auth.cooling(), "a second of it is left");
+            suspend(Duration::from_secs(1));
+            assert!(pump_until(pump, || !auth.cooling()), "still cooling down");
+        });
+        assert_eq!(count(&log, "locked true"), 1, "{log:?}");
+        assert_eq!(count(&log, "locked false"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn a_cooldown_of_any_length_is_waited_out_in_short_steps() {
+        let (backend, _, _) = scripted(three_no_matches);
+        drive_with(backend, capped(1), |auth, pump| {
+            auth.set_cooldown(Duration::from_secs(u64::MAX));
+            auth.start_eager("edraven");
+            pump();
+            assert!(auth.cooling());
+            assert_eq!(auth.cooldown_wait(), Some(COOLDOWN_CHECK));
+            suspend(Duration::from_secs(100 * 365 * 24 * 60 * 60));
+            pump();
+            assert!(auth.cooling());
+        });
     }
 
     #[test]

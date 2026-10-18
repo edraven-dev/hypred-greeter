@@ -63,7 +63,8 @@ username-debounce-ms = 400
 # conversation only, every re-arm opens a fresh one, and faillock never
 # sees a scan. 9 = three conversations of max-tries 3; 0 = no cap.
 fingerprint-misses = 9
-# Seconds a miss is remembered and a cool-down lasts; 0 = no cap.
+# Seconds a miss is remembered and a cool-down lasts, a suspend included;
+# 0 = no cap.
 fingerprint-cooldown = 600
 
 [commands]

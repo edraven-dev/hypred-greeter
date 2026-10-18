@@ -80,7 +80,7 @@ greeter user's.
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image` (a path; a relative one from the config directory), `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
 | `[gtk]` | `dark` (GTK's colour scheme, dark or light: the theme's variant — its `gtk-dark.css` or its media queries — and, from GTK 4.20, what `@media (prefers-color-scheme: dark)` in the stylesheet matches), `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (GTK's scheme is then light, whatever `dark` or the desktop prefers: GTK has no Empty-dark and would load its Default theme in its place; the stylesheet's `@media (prefers-color-scheme: dark)` still matches with `dark = true`) | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `fixed-user` (`true`: always `user`, even over a remembered one — the `username` widget turns read-only, a picker disabled; without `user` it is ignored and named in the banner), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens), `fingerprint-misses` (fingerprint scans that fail to match within `fingerprint-cooldown` seconds before a cool-down that long — see [Fingerprint](#fingerprint-pam_fprintd); `0`: no cap), `fingerprint-cooldown` (seconds a miss is remembered and a cool-down lasts; `0`: no cap) | `false`, `0`, unset, `false`, `30`, `400`, `9`, `600` |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `fixed-user` (`true`: always `user`, even over a remembered one — the `username` widget turns read-only, a picker disabled; without `user` it is ignored and named in the banner), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens), `fingerprint-misses` (fingerprint scans that fail to match within `fingerprint-cooldown` seconds before a cool-down that long — see [Fingerprint](#fingerprint-pam_fprintd); `0`: no cap), `fingerprint-cooldown` (seconds a miss is remembered and a cool-down lasts, a suspend included; `0`: no cap) | `false`, `0`, unset, `false`, `30`, `400`, `9`, `600` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
 | `[keys]` | a map: `"<accelerator>" = "action"` — a key as GTK writes it (`"<Control><Alt>Delete"`, `F2`, `"<Super>l"`) to an action as a `button` names it — see below | none |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, the first in the list (after `only`/`hide`/`names`/`order`), `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
@@ -493,15 +493,16 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.3):
   password prompt answered is refused. A scan already under way runs to its
   end (greetd passes nothing on while pam_fprintd waits), so "Place your
   finger" can still show; a match there is refused too. A miss is forgotten
-  `fingerprint-cooldown` seconds after it came and misses during a
-  cool-down are not counted, so every cool-down ends with none. The count
-  belongs to the greeter process and every name typed into it: a new
-  greeter (after a logout or a reboot) or the one on another VT starts from
-  none. When a cool-down ends, what it held goes on as `rearm-window` has
-  it: a parked prompt re-arms under `"always"`, under `N` if there was
-  input in the last N s (else at the next input), not under `0`; anything
-  else held — a username edit, a failed or refused login — opens at once
-  (at the next input under `0`).
+  `fingerprint-cooldown` seconds after it came, a suspend included (a
+  cool-down whose time ran out in one ends within a second of the resume),
+  and misses during a cool-down are not counted, so every cool-down ends
+  with none. The count belongs to the greeter process and every name typed
+  into it: a new greeter (after a logout or a reboot) or the one on another
+  VT starts from none. When a cool-down ends, what it held goes on as
+  `rearm-window` has it: a parked prompt re-arms under `"always"`, under
+  `N` if there was input in the last N s (else at the next input), not
+  under `0`; anything else held — a username edit, a failed or refused
+  login — opens at once (at the next input under `0`).
 - **A cool-down leaves the password working.** A prompt already parked
   takes it at once. Otherwise PAM's order holds: a submitted password still
   runs pam_fprintd first, which arms the reader up to its `timeout=` before
