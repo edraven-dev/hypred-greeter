@@ -1,6 +1,6 @@
 use gtk4 as gtk;
 use gtk4::prelude::*;
-use gtk4::{gdk, glib};
+use gtk4::{gdk, glib, graphene};
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::Read;
@@ -91,12 +91,37 @@ fn home_in(passwd: &str, user: &str) -> Option<PathBuf> {
     })
 }
 
-fn avatar(user: &str) -> Option<gdk::Texture> {
+fn avatar(user: &str) -> Option<gdk::Paintable> {
     let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
     avatar_paths(user, &passwd)
         .iter()
         .filter_map(|path| read_avatar(path))
         .find_map(|bytes| gdk::Texture::from_bytes(&bytes).ok())
+        .map(squared)
+}
+
+/// A photo's centre square: a picture that is not square would leave bars
+/// in a round or square box. Drawn through a clip, so nothing is copied.
+fn squared(texture: gdk::Texture) -> gdk::Paintable {
+    let (width, height) = (texture.width(), texture.height());
+    if width == height {
+        return texture.upcast();
+    }
+    let (x, y, side) = centre_square(width, height);
+    let (x, y, side) = (x as f32, y as f32, side as f32);
+    let snapshot = gtk::Snapshot::new();
+    snapshot.push_clip(&graphene::Rect::new(0.0, 0.0, side, side));
+    snapshot.append_texture(&texture, &graphene::Rect::new(-x, -y, width as f32, height as f32));
+    snapshot.pop();
+    snapshot
+        .to_paintable(Some(&graphene::Size::new(side, side)))
+        .unwrap_or_else(|| texture.upcast())
+}
+
+/// Offset and side of the largest centred square.
+fn centre_square(width: i32, height: i32) -> (i32, i32, i32) {
+    let side = width.min(height);
+    ((width - side) / 2, (height - side) / 2, side)
 }
 
 fn read_avatar(path: &Path) -> Option<glib::Bytes> {
@@ -372,6 +397,15 @@ mod tests {
         assert!(read_capped(checked, AVATAR_MAX_BYTES).is_none());
         assert!(read_capped(std::io::repeat(0), AVATAR_MAX_BYTES).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_that_is_not_square_shows_its_centre_square() {
+        assert_eq!(centre_square(300, 200), (50, 0, 200));
+        assert_eq!(centre_square(200, 300), (0, 50, 200));
+        assert_eq!(centre_square(4096, 1), (2047, 0, 1));
+        assert_eq!(centre_square(5, 2), (1, 0, 2));
+        assert_eq!(centre_square(64, 64), (0, 0, 64));
     }
 
     #[test]
