@@ -178,15 +178,8 @@ centred.
 
 `spacing` and `margin` given in TOML are floors the stylesheet only adds to;
 prefer `border-spacing` and `margin` in style.css, where a theme can change
-them (the built-in layout sets none).
-
-**Upgrading from 0.2.** The built-in layout used to carry its gaps and
-offsets. A stylesheet kept from 0.2 next to the new layout.toml gets none of
-them; a layout.toml copied from 0.2 next to the new style.css gets them
-twice. Add to a custom stylesheet what the default one now has — `#card {
-border-spacing: 12px; }`, `.hg-clock { margin-top: 48px; }`, `.hg-power {
-margin: 0 24px 24px 0; border-spacing: 8px; }` — and drop `spacing`/`margin`
-from a copied layout; the `power` widget's own `spacing` now defaults to 0.
+them (the built-in layout sets none; for a layout or stylesheet kept from
+0.2 see [Upgrading](#from-02)).
 
 **Widgets:**
 
@@ -567,6 +560,91 @@ conversation starts the cool-down and `.hg-fingerprint-locked`;
 `fingerprint-misses = 3` makes it the first). Under `"always"` any other
 name parks at once and is retried: the third park in a row starts the 31 s
 wait-out, which the log on stderr shows.
+
+## Upgrading
+
+### From 0.3
+
+Every 0.3 key and property still means what it did. What behaves
+differently:
+
+- **`--style` and `--layout`** take a relative path from the current
+  directory, as a shell would; 0.3 took it from the config's directory.
+  `[paths]` values still resolve against the config directory.
+- **Fingerprint misses are capped by default.** `fingerprint-misses = 9`
+  scans that fail to match within `fingerprint-cooldown = 600` seconds
+  start a cool-down that long: nothing arms the reader on its own, and a
+  login no password prompt was answered in — a touch — is refused; the
+  password still logs in. The window gets `.hg-fingerprint-locked`, the
+  message says `[texts] fingerprint-locked`. `0` in either key gives 0.3's
+  unlimited tries back. See [Fingerprint](#fingerprint-pam_fprintd).
+- **A reader that never gets to wait is waited out.** Three passive
+  conversations in a row for one name that reach a prompt without a
+  fingerprint wait hold every re-arm for 31 s, so an fprintd that can no
+  longer claim the reader (the lid closed mid-scan) exits and the next one
+  starts clean; 0.3 kept re-arming every few seconds, which kept that
+  fprintd alive. A parked prompt still takes a password meanwhile.
+- **Logs reach the journal** however the greeter is started: when stderr
+  is not the journal (a compositor's `exec` hands it `/dev/null`), each
+  line, GTK's warnings included, goes to journald —
+  `journalctl -t hypred-greeter`. A `systemd-cat` wrapper still works and
+  logs nothing twice.
+- **Avatars** (`source = "avatar"`) show only a PNG or JPEG file of at most
+  1 MiB and 4096 px a side; a picture in another format, which 0.3 showed,
+  now shows nothing.
+- **Images are clipped to their box and centred.** An `image`, and a
+  button's icon, no longer draws outside its box, so `border-radius` rounds
+  the picture and `-gtk-icon-transform: scale()` crops it to cover; the
+  widget is centred where its parent has more room, unless `anchor` or
+  `halign`/`valign` place it; a non-square avatar shows its centre square.
+- **The colour scheme.** `[gtk] dark` sets GTK's colour scheme
+  (`gtk-interface-color-scheme`, GTK 4.20), and the stylesheet's
+  `@media (prefers-color-scheme: dark)` follows it — in 0.3 it never
+  matched there — as `(prefers-contrast: more)` and
+  `(prefers-reduced-motion: reduce)` follow GTK's settings. From GTK 4.23
+  the deprecated `gtk-application-prefer-dark-theme` is no longer written,
+  so no warning at every start; `theme = "Empty"` with `dark = true` is a
+  blank slate on 4.24 too (0.3 got GTK's light Default theme there), and
+  `dark` without `theme` loads the theme again so that a theme's own
+  `gtk-dark.css` shows.
+- **CSS warnings**: a block GTK never applies (an undefined `@media`
+  feature) and a file that ends inside a block now reach the banner;
+  deprecations, a block's last declaration without `;` and an empty one
+  (`;;`) are only logged.
+- **State classes.** `.hg-failed` also ends with a message widget's
+  `error-clear-ms`, no longer sticks after a stall, and an `animation:` on
+  it restarts on every failure, even one in the frame a re-arm or a
+  submission took the class off. `.hg-starting` is dropped by a failed
+  start, and under `--demo` stays until the next attempt so that a theme
+  can preview it; under greetd it lasts until the greeter exits, too short
+  for a transition to show.
+- **A command that fails is reported**: a power, `button` or `[keys]`
+  command that exits unsuccessfully within 10 s shows
+  `[texts] power-failed`, with an `{error}` such as `exit status: 1`; 0.3
+  reported only one that could not start.
+- **A `password` widget that fails to build** (a bad property) makes the
+  layout fall back to the built-in one, with a banner line — 0.3 left its
+  ⚠ placeholder and no way to type a password. A `username` widget skips
+  a property it cannot use instead of failing.
+- **Label command output** keeps `{{` and `}}` as they are (0.3 made each
+  one brace), and under `markup` a placeholder's value no longer fails the
+  build check (`{time:%d & %m}`).
+
+New: `--check`; `[keys]`; `[auth] fixed-user`; `username` pickers
+(`style = "dropdown"` or `"buttons"`); `mask-visible` and `invisible-char`
+on `password`; the state classes `.hg-prompt-visible` and
+`.hg-fingerprint-locked`; `[texts] fingerprint-locked`.
+
+### From 0.2
+
+The built-in layout used to carry its gaps and offsets. A stylesheet kept
+from 0.2 next to the new layout.toml gets none of them; a layout.toml
+copied from 0.2 next to the new style.css gets them twice. Add to a custom
+stylesheet what the default one now has — `#card { border-spacing: 12px; }`,
+`.hg-clock { margin-top: 48px; }`,
+`.hg-power { margin: 0 24px 24px 0; border-spacing: 8px; }` — and drop
+`spacing`/`margin` from a copied layout; the `power` widget's own `spacing`
+now defaults to 0.
 
 ## Development
 
