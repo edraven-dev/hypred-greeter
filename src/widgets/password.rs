@@ -143,10 +143,13 @@ fn invisible_char(node: &Node) -> Result<Option<char>, WidgetError> {
 /// With `prompt-placeholder`: the placeholder after `event`, `Some(None)`
 /// being the widget's own. A pending prompt other than the plain
 /// "Password:" ("New password:", "Token:") stands in for it until the
-/// prompt ends; a re-arm ends a parked one with nothing but `Armed`.
+/// prompt ends, unless a rewrite rule dropped its text; a re-arm ends a
+/// parked one with nothing but `Armed`.
 fn placeholder_after(event: &UiEvent) -> Option<Option<&str>> {
     match event {
-        UiEvent::Prompt { text, .. } => Some(Some(text.as_str()).filter(|t| !is_default_prompt(t))),
+        UiEvent::Prompt { text, .. } => {
+            Some(Some(text.as_str()).filter(|t| !t.is_empty() && !is_default_prompt(t)))
+        }
         UiEvent::Busy(true) | UiEvent::AuthError(_) | UiEvent::Armed(true) => Some(None),
         UiEvent::Info(text) if text.is_empty() => Some(None),
         UiEvent::Info(_)
@@ -236,6 +239,7 @@ impl Mask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{TextKind, Texts};
 
     fn node(props: &str) -> Node {
         let text = format!("[root]\nwidget = \"password\"\n{props}\n");
@@ -292,6 +296,20 @@ mod tests {
             UiEvent::UsernameChanged("mfa".into()),
         ] {
             assert_eq!(placeholder_after(&event), None, "{event:?}");
+        }
+    }
+
+    #[test]
+    fn a_prompt_a_rewrite_rule_dropped_leaves_the_own_placeholder() {
+        let rule = "[[rewrite]]\nmatch = \"Token\"\ntext = \"\"\nkind = \"prompt\"\n";
+        let texts: Texts = toml::from_str(rule).unwrap();
+        // Auth sends a dropped prompt on with an empty text.
+        let text = texts.rewrite(TextKind::Prompt, "Token:").unwrap_or_default();
+        for secret in [false, true] {
+            for passive in [false, true] {
+                let dropped = UiEvent::Prompt { secret, text: text.clone(), passive };
+                assert_eq!(placeholder_after(&dropped), Some(None), "{dropped:?}");
+            }
         }
     }
 
