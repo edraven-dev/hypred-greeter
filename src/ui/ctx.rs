@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::actions::Runs;
 use crate::auth::Auth;
 use crate::config::Config;
 use crate::layout::{build, Node};
@@ -59,6 +60,7 @@ pub struct AppHandle {
     pub auth: Rc<Auth>,
     pub bus: Rc<Bus>,
     pub shared: Rc<Shared>,
+    pub runs: Rc<Runs>,
     username_debounce: Duration,
     edit_debounce: Rc<Cell<Option<glib::SourceId>>>,
 }
@@ -70,7 +72,8 @@ impl AppHandle {
         shared: Rc<Shared>,
         username_debounce: Duration,
     ) -> Self {
-        Self { auth, bus, shared, username_debounce, edit_debounce: Rc::default() }
+        let (runs, edit_debounce) = (Rc::default(), Rc::default());
+        Self { auth, bus, shared, runs, username_debounce, edit_debounce }
     }
 
     pub fn username(&self) -> String {

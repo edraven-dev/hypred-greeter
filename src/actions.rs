@@ -2,6 +2,7 @@ use gtk4 as gtk;
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::process::{Child, Command, Stdio};
@@ -17,6 +18,23 @@ const BUILT_IN: &str = "cancel, next-session, prev-session, focus-username, focu
 /// A command that fails later than this after its click is a long-lived
 /// helper dying, not an answer to the click.
 const REPORT_WITHIN: Duration = Duration::from_secs(10);
+
+/// A run of a command this soon after its last one asks for the same thing
+/// again, and its failure is no news: logind refuses a second reboot while
+/// the first is under way.
+const REPEAT_WITHIN: Duration = Duration::from_secs(2);
+
+/// When each command last started.
+#[derive(Default)]
+pub struct Runs(RefCell<HashMap<Vec<String>, Instant>>);
+
+impl Runs {
+    /// Notes `argv` starting at `now`; true when that repeats its last run.
+    fn repeat(&self, argv: &[String], now: Instant) -> bool {
+        let last = self.0.borrow_mut().insert(argv.to_vec(), now);
+        last.is_some_and(|last| now.saturating_duration_since(last) < REPEAT_WITHIN)
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
@@ -65,11 +83,15 @@ fn run(app: &AppHandle, demo: bool, texts: &Texts, argv: &[String]) {
         app.emit(&UiEvent::Info(format!("demo: would run {}", argv.join(" "))));
         return;
     }
+    let repeat = app.runs.repeat(argv, Instant::now());
     let spawned =
         Command::new(program).args(args).stdin(Stdio::null()).env_remove("GREETD_SOCK").spawn();
     match spawned {
         Ok(child) => {
             let failure = reap(child, Instant::now() + REPORT_WITHIN);
+            if repeat {
+                return;
+            }
             let (app, template, argv) = (app.clone(), texts.power_failed.clone(), argv.to_vec());
             glib::spawn_future_local(async move {
                 if let Ok(why) = failure.recv().await {
@@ -77,6 +99,7 @@ fn run(app: &AppHandle, demo: bool, texts: &Texts, argv: &[String]) {
                 }
             });
         }
+        Err(_) if repeat => {}
         Err(err) => report(app, &texts.power_failed, argv, &err.to_string()),
     }
 }
@@ -224,10 +247,11 @@ mod tests {
         assert_eq!(reaped(&["sh", "-c", "exit 3"], Duration::ZERO), None);
     }
 
-    #[test]
-    fn a_command_that_cannot_start_or_exits_unsuccessfully_is_a_pam_error() {
+    /// Runs each argv as a click would and returns what was shown, once
+    /// `expected` PamErrors are in and a little after, for any extra one.
+    fn shown_after(runs: &[&[&str]], expected: usize) -> Vec<String> {
         let shared = Shared::new(String::new(), Vec::new(), State::default(), None);
-        let log = events(shared, |app| {
+        events(shared, |app| {
             let errors = Rc::new(Cell::new(0));
             let counter = errors.clone();
             app.bus.subscribe(move |event| {
@@ -236,16 +260,24 @@ mod tests {
                 }
             });
             let texts = Texts::default();
-            for words in [&["true"][..], &["/nonexistent/prog"], &["sh", "-c", "exit 3"]] {
+            for words in runs {
                 run(app, false, &texts, &argv(words));
             }
             let context = glib::MainContext::ref_thread_default();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while errors.get() < 2 && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(1));
-                while context.iteration(false) {}
-            }
-        });
+            let pump_until = |deadline: Instant, done: &dyn Fn() -> bool| {
+                while !done() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                    while context.iteration(false) {}
+                }
+            };
+            pump_until(Instant::now() + Duration::from_secs(5), &|| errors.get() >= expected);
+            pump_until(Instant::now() + Duration::from_millis(300), &|| false);
+        })
+    }
+
+    #[test]
+    fn a_command_that_cannot_start_or_exits_unsuccessfully_is_a_pam_error() {
+        let log = shown_after(&[&["true"], &["/nonexistent/prog"], &["sh", "-c", "exit 3"]], 2);
         assert_eq!(
             log,
             [
@@ -253,6 +285,34 @@ mod tests {
                 "PamError(\"sh: exit status: 3\")",
             ]
         );
+    }
+
+    #[test]
+    fn a_command_run_again_at_once_reports_only_its_first_run() {
+        let exit = &["sh", "-c", "exit 3"][..];
+        let missing = &["/nonexistent/prog"][..];
+        let log = shown_after(&[exit, exit, missing, missing, exit], 2);
+        assert_eq!(
+            log,
+            [
+                "PamError(\"/nonexistent/prog: No such file or directory (os error 2)\")",
+                "PamError(\"sh: exit status: 3\")",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_soon_after_the_last_of_its_command_is_a_repeat() {
+        let runs = Runs::default();
+        let (reboot, poweroff) = (argv(&["systemctl", "reboot"]), argv(&["systemctl", "poweroff"]));
+        let start = Instant::now();
+        let after = |ms: u64| start + Duration::from_millis(ms);
+        assert!(!runs.repeat(&reboot, after(0)));
+        assert!(runs.repeat(&reboot, after(150)));
+        assert!(!runs.repeat(&poweroff, after(200)));
+        assert!(runs.repeat(&reboot, after(2100)), "counted from the last run, not the first");
+        assert!(!runs.repeat(&reboot, after(4100)));
+        assert!(runs.repeat(&poweroff, after(2199)));
     }
 
     #[test]
