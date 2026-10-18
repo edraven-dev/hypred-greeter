@@ -14,8 +14,8 @@ fit = "cover"              # cover | contain | fill | scale-down
 
 [gtk]
 # Unset keys leave the GTK defaults alone. `dark` is GTK's colour scheme:
-# the theme's dark or light variant, and what @media (prefers-color-scheme:
-# dark) in the stylesheet matches.
+# the theme's dark or light variant, and (GTK 4.20+) what
+# @media (prefers-color-scheme: dark) in the stylesheet matches.
 # dark = true
 # theme = "adw-gtk3-dark"
 # icon-theme = "Papirus-Dark"
