@@ -40,10 +40,12 @@ pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
 
 /// USER priority so the stylesheet wins over theme/application styles.
 pub fn load_css(path: &Path) -> Vec<String> {
+    let display = gtk::gdk::Display::default().expect("no display");
     let provider = gtk::CssProvider::new();
+    follow_color_scheme(&gtk::Settings::for_display(&display), &provider);
     // The callback runs inside load_from_path: the list is complete once
-    // that returns.
-    let errors = Rc::new(RefCell::new(Vec::new()));
+    // that returns. A re-parse after a scheme change only logs.
+    let errors = Rc::new(RefCell::new(Some(Vec::new())));
     let sink = errors.clone();
     provider.connect_parsing_error(move |_, section, err| {
         let file = section.file().and_then(|file| file.basename());
@@ -54,7 +56,9 @@ pub fn load_css(path: &Path) -> Vec<String> {
             return;
         }
         error!("css {problem}");
-        sink.borrow_mut().push(problem);
+        if let Some(sink) = sink.borrow_mut().as_mut() {
+            sink.push(problem);
+        }
     });
 
     let mut problems = Vec::new();
@@ -70,14 +74,29 @@ pub fn load_css(path: &Path) -> Vec<String> {
             provider.load_from_string(DEFAULT_STYLE);
         }
     }
-    problems.extend(capped(errors.take(), CSS_PROBLEM_LINES));
+    problems.extend(capped(errors.take().unwrap_or_default(), CSS_PROBLEM_LINES));
 
     gtk::style_context_add_provider_for_display(
-        &gtk::gdk::Display::default().expect("no display"),
+        &display,
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_USER,
     );
     problems
+}
+
+/// GTK binds its colour scheme to the theme and to the user's gtk.css
+/// only; a provider of our own left unbound never matches
+/// `@media (prefers-color-scheme: dark)`. Bound before the load, so the
+/// sheet is parsed once.
+fn follow_color_scheme(settings: &gtk::Settings, provider: &gtk::CssProvider) {
+    if settings.find_property(COLOR_SCHEME).is_some()
+        && provider.find_property("prefers-color-scheme").is_some()
+    {
+        settings
+            .bind_property(COLOR_SCHEME, provider, "prefers-color-scheme")
+            .sync_create()
+            .build();
+    }
 }
 
 /// A deprecated construct still renders. Any other warning is a rule that
@@ -359,10 +378,11 @@ fn theme_change(cfg: &config::Gtk) -> Theme<'_> {
     }
 }
 
-/// gtk-interface-color-scheme (GTK 4.20) is looked up at runtime: the
-/// binding is built for 4.12. GTK 4.23 turned prefer-dark into a deprecated
-/// alias of it that warns on every write; before, the theme variant came
-/// from prefer-dark alone, so an older GTK gets that too.
+/// gtk-interface-color-scheme (GTK 4.20), what media queries see, is set
+/// by name: the binding is built for 4.12. The theme variant follows it
+/// from GTK 4.23, where prefer-dark became a deprecated alias that warns
+/// on every write; before, the variant came from prefer-dark alone, so an
+/// older GTK gets that as well.
 fn set_color_scheme(settings: &gtk::Settings, dark: bool) {
     let scheme = settings.find_property(COLOR_SCHEME).and_then(|pspec| scheme_value(&pspec, dark));
     if let Some(scheme) = &scheme {
