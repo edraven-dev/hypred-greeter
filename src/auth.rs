@@ -9,12 +9,12 @@
 //! greeter sends is processed, so a password typed meanwhile is stashed
 //! and answers the next secret prompt. Only a fresh conversation re-arms
 //! the reader, hence the restart of a parked conversation. A conversation
-//! is only ever answered, restarted or started for the user shown in the
-//! username entry. With a remembered user and session nothing has to be
-//! pressed: the reader is armed as the greeter appears, a touch starts the
-//! session, and `rearm-window = "always"` keeps it that way for as long as
-//! the greeter is up — and on screen: a greeter on a VT nobody looks at
-//! arms nothing, the reader belongs to the VT in front of the user.
+//! is only ever answered, restarted or started for the username shown.
+//! With a remembered user and session nothing has to be pressed: the
+//! reader is armed as the greeter appears, a touch starts the session, and
+//! `rearm-window = "always"` keeps it that way for as long as the greeter
+//! is up — and on screen: a greeter on a VT nobody looks at arms nothing,
+//! the reader belongs to the VT in front of the user.
 //!
 //! pam_fprintd's max-tries holds per conversation only and faillock never
 //! sees a scan, so re-arming alone would make fingerprint tries unlimited:

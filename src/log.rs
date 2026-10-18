@@ -1,8 +1,8 @@
 //! Every line goes to stderr. A greeter's stderr is rarely the journal —
 //! Hyprland's exec hands its children /dev/null, greetd a VT — so unless it
-//! is, or under --demo, each line also goes to journald's native socket,
-//! and so do GLib's and GTK's messages: the log does not depend on how the
-//! greeter was started.
+//! is, or under --demo or --check, each line also goes to journald's native
+//! socket, and so do GLib's and GTK's messages: the log does not depend on
+//! how the greeter was started.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -51,7 +51,7 @@ pub fn write(level: Level, message: std::fmt::Arguments) {
 }
 
 /// Before anything is logged; never in tests (GLib takes one writer only).
-pub fn init(demo: bool) {
+pub fn init(greetd: bool) {
     let stderr = std::io::stderr();
     let stderr_id = stderr
         .as_fd()
@@ -61,7 +61,7 @@ pub fn init(demo: bool) {
         .map(|meta| (meta.dev(), meta.ino()));
     let stream = std::env::var("JOURNAL_STREAM").ok();
     let stderr_is_journal = glib::log_writer_is_journald(&stderr);
-    if !needs_journal(demo, stderr_is_journal, stream.as_deref(), stderr_id) {
+    if !needs_journal(greetd, stderr_is_journal, stream.as_deref(), stderr_id) {
         return;
     }
     if !std::fs::metadata(JOURNAL_SOCKET).is_ok_and(|meta| meta.file_type().is_socket()) {
@@ -76,12 +76,12 @@ pub fn init(demo: bool) {
 /// so in JOURNAL_STREAM (`dev:inode` of that stream); a child that merely
 /// inherited the variable has another stderr.
 fn needs_journal(
-    demo: bool,
+    greetd: bool,
     stderr_is_journal: bool,
     journal_stream: Option<&str>,
     stderr: Option<(u64, u64)>,
 ) -> bool {
-    if demo || stderr_is_journal {
+    if !greetd || stderr_is_journal {
         return false;
     }
     let stream = journal_stream.and_then(|value| {
@@ -143,13 +143,13 @@ mod tests {
     #[test]
     fn the_journal_is_written_only_where_stderr_is_not_it() {
         let stderr = Some((10, 10136));
-        assert!(!needs_journal(true, false, None, None), "demo");
-        assert!(!needs_journal(false, true, None, stderr), "stderr connected to the journal");
-        assert!(!needs_journal(false, false, Some("10:10136"), stderr), "systemd-cat");
-        assert!(needs_journal(false, false, Some("10:10136"), Some((5, 4))), "inherited");
-        assert!(needs_journal(false, false, None, stderr), "no JOURNAL_STREAM");
-        assert!(needs_journal(false, false, Some("10-10136"), stderr), "malformed");
-        assert!(needs_journal(false, false, Some("10:10136"), None), "stderr closed");
+        assert!(!needs_journal(false, false, None, None), "--demo or --check");
+        assert!(!needs_journal(true, true, None, stderr), "stderr connected to the journal");
+        assert!(!needs_journal(true, false, Some("10:10136"), stderr), "systemd-cat");
+        assert!(needs_journal(true, false, Some("10:10136"), Some((5, 4))), "inherited");
+        assert!(needs_journal(true, false, None, stderr), "no JOURNAL_STREAM");
+        assert!(needs_journal(true, false, Some("10-10136"), stderr), "malformed");
+        assert!(needs_journal(true, false, Some("10:10136"), None), "stderr closed");
     }
 
     #[test]

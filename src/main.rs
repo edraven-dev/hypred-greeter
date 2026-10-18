@@ -35,7 +35,7 @@ fn main() {
     }));
 
     let args = cli::parse();
-    log::init(args.demo || args.check);
+    log::init(args.greetd());
 
     if args.greetd() && std::env::var_os("GREETD_SOCK").is_none() {
         log::error!("GREETD_SOCK is not set; run under greetd, or pass --demo or --check");
