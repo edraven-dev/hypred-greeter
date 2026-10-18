@@ -111,11 +111,11 @@ widget = "background"
 [[root.children]]
 widget = "clock"
 format = "%A %e %B  %H:%M"
-anchor = "top"                # its offset: .hg-clock { margin-top: 48px } in style.css
+anchor = "top"                # its offset: .hg-clock { margin-top: 48px; } in style.css
 
 [[root.children]]
 widget = "box"
-name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px }
+name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px; }
 orientation = "vertical"
 anchor = "center"
 
@@ -145,8 +145,8 @@ them (the built-in layout sets none).
 offsets. A stylesheet kept from 0.2 next to the new layout.toml gets none of
 them; a layout.toml copied from 0.2 next to the new style.css gets them
 twice. Add to a custom stylesheet what the default one now has — `#card {
-border-spacing: 12px }`, `.hg-clock { margin-top: 48px }`, `.hg-power {
-margin: 0 24px 24px 0; border-spacing: 8px }` — and drop `spacing`/`margin`
+border-spacing: 12px; }`, `.hg-clock { margin-top: 48px; }`, `.hg-power {
+margin: 0 24px 24px 0; border-spacing: 8px; }` — and drop `spacing`/`margin`
 from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 
 **Widgets:**
@@ -208,9 +208,11 @@ animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.h
 stylesheet can carry a light and a dark look.
 Parse errors are skipped, never fatal: each is logged and shown in the banner
 as `style.css:3:6: …` (the first five; the rest are counted). So are GTK's
-warnings — an undefined `@media` feature leaves its block unused — except
-deprecations (`@define-color`, `alpha()`; GTK reports them only with
-`GTK_DEBUG=css`), which still work and are only logged.
+warnings about a block that is never used (an undefined `@media` feature) or
+a file that ends inside a block (a missing `}`). Warnings about what still
+works are only logged: deprecations (`@define-color`, `alpha()`; GTK reports
+them only with `GTK_DEBUG=css`), a block's last declaration without its `;`,
+an empty declaration (`;;`).
 
 **Sizes relative to the screen.** GTK CSS has no `%`/`vw` units for sizes,
 so the greeter publishes the window's size as custom properties on

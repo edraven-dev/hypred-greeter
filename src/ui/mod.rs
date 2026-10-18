@@ -100,10 +100,20 @@ fn follow_color_scheme(settings: &gtk::Settings, provider: &gtk::CssProvider) {
     }
 }
 
-/// A deprecated construct still renders. Any other warning is a rule that
-/// never applies (an undefined `@media` feature), as good as an error.
+/// Syntax warnings GTK raises for what CSS allows, and applies anyway: a
+/// block's last declaration without `;`, an empty one (`;;`). GTK does not
+/// translate them.
+const CSS_RECOVERIES: [&str; 2] = ["Expected ';' at end of block", "Empty declaration"];
+
+/// A deprecated construct still renders, and so does what GTK recovers
+/// from above. Any other warning is a block that never applies (an
+/// undefined `@media` feature) or a file that ends inside a block.
 fn on_banner(err: &glib::Error) -> bool {
-    !matches!(err.kind::<gtk::CssParserWarning>(), Some(gtk::CssParserWarning::Deprecated))
+    match err.kind::<gtk::CssParserWarning>() {
+        Some(gtk::CssParserWarning::Deprecated) => false,
+        Some(gtk::CssParserWarning::Syntax) => !CSS_RECOVERIES.contains(&err.message()),
+        _ => true,
+    }
 }
 
 /// `style.css:3:6: …` — GTK counts lines and columns from zero.
@@ -429,15 +439,19 @@ mod tests {
     }
 
     #[test]
-    fn only_css_deprecations_stay_off_the_banner() {
-        let deprecated = glib::Error::new(gtk::CssParserWarning::Deprecated, "alpha() is old");
-        assert!(!on_banner(&deprecated));
-        for warning in [gtk::CssParserWarning::Syntax, gtk::CssParserWarning::Unimplemented] {
-            let err = glib::Error::new(warning, "Undefined @media feature 'min-width'");
-            assert!(on_banner(&err), "{warning:?}");
-        }
+    fn css_warnings_about_what_still_applies_stay_off_the_banner() {
+        use gtk::CssParserWarning::{Deprecated, Syntax, Unimplemented};
+        let warning = |kind, text| on_banner(&glib::Error::new(kind, text));
+        assert!(!warning(Deprecated, "alpha() is deprecated"));
+        assert!(!warning(Syntax, "Expected ';' at end of block"));
+        assert!(!warning(Syntax, "Empty declaration"));
+        assert!(warning(Syntax, "Undefined @media feature 'min-width'"));
+        assert!(warning(Syntax, "Unterminated block at end of document"));
+        assert!(warning(Unimplemented, "Undefined @media feature 'min-width'"));
+        assert!(warning(Unimplemented, "Empty declaration"));
         for error in [gtk::CssParserError::Syntax, gtk::CssParserError::UnknownValue] {
             assert!(on_banner(&glib::Error::new(error, "No property named \"colour\"")));
+            assert!(on_banner(&glib::Error::new(error, "Empty declaration")));
         }
     }
 
