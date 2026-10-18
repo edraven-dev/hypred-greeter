@@ -52,13 +52,18 @@ relative one from the current directory:
 hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 ```
 
-`--check` loads all three as the greeter under greetd does — a layout that
-makes login impossible is swapped for the built-in one, where `--demo` keeps
-it — and builds the widgets, without a window, greetd or label commands. It
-prints every problem the banner would show to stderr, each CSS problem too
-where the banner counts those past the fifth, and exits 1 if there is one, 0
-if not. It needs a display: run it from your desktop session before logging
-out onto a new config, stylesheet, layout or package.
+`--check` loads all three as the greeter under greetd does on its first
+start — a layout that makes login impossible is swapped for the built-in
+one, where `--demo` keeps it — and builds the widgets, without a window,
+greetd or label commands. It prints every problem the banner would show to
+stderr, each CSS problem too where the banner counts those past the fifth,
+and exits 1 if there is one, 0 if not. It needs a display: run it from your
+desktop session before logging out onto a new config, stylesheet, layout or
+package. Two things differ from the login screen: the state file is left
+alone (only root and the greeter user may read it), so no user is
+remembered and a layout without a `username` widget passes only with
+`[auth] user`; and sessions are looked up in your `XDG_DATA_DIRS`, not the
+greeter user's.
 
 ### config.toml
 

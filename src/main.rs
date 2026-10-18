@@ -58,7 +58,7 @@ fn main() {
         let mut problems = loaded.problems.clone();
         problems.extend(ui::css_lines(ui::load_css(&style), args.check));
 
-        let saved = state::load();
+        let saved = if args.reads_state() { state::load() } else { state::State::default() };
         let initial_username = saved
             .last_user
             .clone()

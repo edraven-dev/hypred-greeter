@@ -10,11 +10,11 @@ usage: hypred-greeter [options]
                     directory, a relative [paths] value from the config's)
   --demo            windowed demo mode: fake auth; power/button commands are
                     announced, not run (label commands do run)
-  --check           load config, style and layout as under greetd and build
-                    the widgets (no window, no greetd, no label commands);
-                    print every problem the banner would show, exit 1 if
-                    there is one. Needs a display: run it before logging out
-                    onto a new config or package
+  --check           load config, style and layout as a first start under
+                    greetd would (no remembered user) and build the widgets
+                    (no window, no greetd, no label commands); print every
+                    problem, exit 1 if there is one. Needs a display: run it
+                    before logging out onto a new config or package
   --version         print version and exit
   --help            this text";
 
@@ -32,6 +32,12 @@ impl Args {
     /// written.
     pub fn greetd(&self) -> bool {
         !self.demo && !self.check
+    }
+
+    /// The state file is the greeter user's, unreadable to whoever runs
+    /// --check: the check judges a first start, the same for everyone.
+    pub fn reads_state(&self) -> bool {
+        !self.check
     }
 }
 
@@ -100,11 +106,12 @@ mod tests {
         let args =
             parse(&["--check", "--config", "/etc/x/config.toml", "--style", "a.css"]).unwrap();
         assert!(args.check && !args.demo);
-        assert!(!args.greetd());
+        assert!(!args.greetd() && !args.reads_state());
         assert_eq!(args.config, Some(PathBuf::from("/etc/x/config.toml")));
         assert_eq!(args.style, Some(PathBuf::from("a.css")));
         assert!(parse(&["--demo"]).is_ok_and(|args| !args.check && !args.greetd()));
-        assert!(parse(&[]).is_ok_and(|args| args.greetd()));
+        assert!(parse(&["--demo"]).is_ok_and(|args| args.reads_state()));
+        assert!(parse(&[]).is_ok_and(|args| args.greetd() && args.reads_state()));
     }
 
     #[test]
