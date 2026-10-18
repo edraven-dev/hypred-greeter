@@ -313,11 +313,13 @@ impl WidgetDef for LabelDef {
             | UiEvent::Focus(_) => {}
         });
         if let Some(argv) = command.filter(|_| !ctx.check) {
-            let outputs = run_command(argv, interval as u64);
-            glib::spawn_future_local(async move {
-                while let Ok(output) = outputs.recv().await {
-                    live.set_source(&output);
-                }
+            ctx.defer_command(move || {
+                let outputs = run_command(argv, interval as u64);
+                glib::spawn_future_local(async move {
+                    while let Ok(output) = outputs.recv().await {
+                        live.set_source(&output);
+                    }
+                });
             });
         }
         Ok(label.upcast())

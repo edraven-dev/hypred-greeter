@@ -197,6 +197,9 @@ pub struct BuildCtx<'a> {
     pub username_focus: Rc<UsernameFocus>,
     problems: RefCell<Vec<String>>,
     built: RefCell<std::collections::HashSet<String>>,
+    /// Label commands, started once their tree is the one shown: a layout
+    /// that falls back is built, and thrown away, first.
+    commands: RefCell<Vec<Box<dyn FnOnce()>>>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -239,6 +242,7 @@ impl<'a> BuildCtx<'a> {
             username_focus,
             problems,
             built: RefCell::default(),
+            commands: RefCell::default(),
         }
     }
 
@@ -270,6 +274,20 @@ impl<'a> BuildCtx<'a> {
     pub fn built(&self, kind: &str) -> bool {
         self.built.borrow().contains(kind)
     }
+
+    pub fn defer_command(&self, start: impl FnOnce() + 'static) {
+        self.commands.borrow_mut().push(Box::new(start));
+    }
+
+    pub fn discard_commands(&self) {
+        self.commands.take();
+    }
+
+    pub fn start_commands(&self) {
+        for start in self.commands.take() {
+            start();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,6 +295,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::sessions::{Kind, Session};
     use crate::state::State;
+    use std::path::Path;
 
     fn session(name: &str, stem: &str) -> Session {
         Session {
@@ -457,6 +476,27 @@ pub(crate) mod tests {
         );
         assert_eq!(focus(&[unrooted]), (false, vec!["unrooted entry"]));
         assert_eq!(focus(&[]), (false, vec![]));
+    }
+
+    #[test]
+    fn commands_start_for_the_tree_shown_only() {
+        let shared = Shared::new(String::new(), sessions(), State::default(), None);
+        events(shared, |app| {
+            let (config, registry) = (Config::default(), Registry::builtin());
+            let ctx = BuildCtx::new(&config, Path::new("/"), &registry, app.clone(), false, false);
+            let ran = Rc::new(RefCell::new(Vec::new()));
+            let run = |name| {
+                let ran = ran.clone();
+                move || ran.borrow_mut().push(name)
+            };
+            ctx.defer_command(run("thrown away"));
+            ctx.discard_commands();
+            ctx.defer_command(run("shown"));
+            assert!(ran.borrow().is_empty(), "nothing starts while a tree is built");
+            ctx.start_commands();
+            ctx.start_commands();
+            assert_eq!(*ran.borrow(), ["shown"]);
+        });
     }
 
     #[test]

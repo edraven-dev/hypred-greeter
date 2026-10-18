@@ -173,10 +173,12 @@ fn main() {
         };
         if let Err(why) = built {
             ctx.problem(format!("{why} — using built-in layout"));
+            ctx.discard_commands();
             fallback = layout::builtin();
             tree = &fallback;
             root = layout::build::build_node(&ctx, tree);
         }
+        ctx.start_commands();
         problems.extend(ctx.take_problems());
         let focus_placed = layout::requests_focus(tree);
         let shortcuts = actions::shortcuts(&loaded.config, &handle, args.demo, &mut problems);
