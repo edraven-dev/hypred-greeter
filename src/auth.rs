@@ -98,6 +98,8 @@ enum Phase {
         started: Instant,
         asked_secret: bool,
         answered_secret: bool,
+        /// Opened for the password of a login refused in a cool-down.
+        resubmitted: bool,
     },
     Starting,
 }
@@ -600,9 +602,17 @@ impl Auth {
             started: Instant::now(),
             asked_secret: false,
             answered_secret: false,
+            resubmitted: false,
         };
         self.sync_armed();
         self.send(Request::CreateSession { username: user });
+    }
+
+    fn resubmit(&self, user: String, password: String) {
+        self.open(user, Some(password), false);
+        if let Phase::Conversing { resubmitted, .. } = &mut *self.phase.borrow_mut() {
+            *resubmitted = true;
+        }
     }
 
     /// The CancelSession is stamped with the OLD generation so even its own
@@ -831,7 +841,15 @@ impl Auth {
         let phase = std::mem::replace(&mut *self.phase.borrow_mut(), Phase::Idle);
         self.sync_armed();
         match phase {
-            Phase::Conversing { user, passive, stash, answered_secret, .. } => {
+            Phase::Conversing {
+                user,
+                passive,
+                stash,
+                answered_secret,
+                saw_info,
+                resubmitted,
+                ..
+            } => {
                 let shown = (self.hooks.current_username)();
                 if user != shown {
                     // Authenticated while the username was being edited:
@@ -857,14 +875,22 @@ impl Auth {
                 if self.cooling.get() && !answered_secret {
                     warn_!("fingerprint cool-down: refused a login no password was answered in");
                     self.abandon_conversation();
-                    if stash.is_none() && !passive {
-                        self.emit(UiEvent::Busy(false));
-                    }
-                    self.say_cooling();
                     match stash {
-                        // Never asked for in this one: a new conversation takes it.
-                        Some(password) => self.open(user, Some(password), false),
-                        None => self.pending_rearm.set(self.eager),
+                        // Never asked for in this one: a new conversation asks
+                        // for it unless touched again. Once, and only after a
+                        // scan: a stack that lets the user in without asking
+                        // would loop.
+                        Some(password) if saw_info && !resubmitted => {
+                            self.say_cooling();
+                            self.resubmit(user, password);
+                        }
+                        _ => {
+                            if !passive {
+                                self.emit(UiEvent::Busy(false));
+                            }
+                            self.say_cooling();
+                            self.pending_rearm.set(self.eager);
+                        }
                     }
                     return;
                 }
@@ -2471,6 +2497,58 @@ mod tests {
         ];
         assert_eq!(requests(&seen), expected);
         assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn a_refused_login_takes_the_password_into_one_new_conversation_only() {
+        let (backend, seen, gate) = scripted(miss_then_touch);
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            gate.release();
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            gate.release();
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Fresh));
+            auth.backdate(RESTART_COOLDOWN);
+            auth.note_activity();
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+        let touched = ["respond None", "respond None", "respond None", "cancel"];
+        let expected = [&["create edraven"], &touched[..], &["create edraven"], &touched].concat();
+        assert_eq!(requests(&seen), expected);
+        let refused = [String::from("busy false"), LOCKED.into()];
+        assert!(log.ends_with(&refused), "{log:?}");
+        assert_eq!(count(&log, "busy false"), 1, "{log:?}");
+        assert!(!log.iter().any(|e| e == "starting"), "{log:?}");
+    }
+
+    #[test]
+    fn a_login_no_scan_explains_is_refused_without_a_new_conversation() {
+        let (backend, seen, _) = scripted(|user| match user {
+            // Let in without being asked: pam_unix nullok and a blank password.
+            "blank" => vec![],
+            _ => vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ],
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            show("blank");
+            auth.start_eager("blank");
+            auth.submit("x".into());
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Fresh));
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+        let blank = requests(&seen).iter().filter(|r| *r == "create blank").count();
+        assert_eq!(blank, 1, "{:?}", requests(&seen));
+        let refused = [String::from("busy false"), LOCKED.into()];
+        assert!(log.ends_with(&refused), "{log:?}");
     }
 
     #[test]

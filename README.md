@@ -402,11 +402,14 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   works: a prompt already parked takes it at once. Otherwise PAM's order
   holds: a submitted password still runs pam_fprintd first, which arms the
   reader up to its `timeout=` before the password is asked for; during the
-  cool-down a touch there is refused, and the password goes into a new
-  conversation (pam_fprintd's wait included). A miss is forgotten
-  `fingerprint-cooldown` seconds after it came, misses during a cool-down
-  are not counted, and when one ends the reader re-arms as `rearm-window`
-  says.
+  cool-down a touch there is refused, and the password goes into one new
+  conversation (pam_fprintd's wait included). When that one is refused as
+  well (touched again), or no scan came before the refused login (a stack
+  that lets the user in without asking, like a blank password under
+  `nullok`: no way in during a cool-down), the password is dropped — type
+  it again. A miss is forgotten `fingerprint-cooldown` seconds after it
+  came, misses during a cool-down are not counted, and when one ends the
+  reader re-arms as `rearm-window` says.
 - **Eager mode cancels PAM prompts — carry the right stack before enabling
   it.** Every restart, username change and Escape on a half-answered
   prompt drops a conversation that may sit at the password prompt. pam_unix
