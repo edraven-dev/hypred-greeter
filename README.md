@@ -67,11 +67,16 @@ greetd or label commands. It prints every problem the banner would show to
 stderr, each CSS problem too where the banner counts those past the fifth,
 and exits 1 if there is one, 0 if not. It needs a display: run it from your
 desktop session before logging out onto a new config, stylesheet, layout or
-package. Two things differ from the login screen: the state file is left
+package. Three things differ from the login screen: the state file is left
 alone (only root and the greeter user may read it), so no user is
 remembered and a layout without a `username` widget passes only with
-`[auth] user`; and sessions are looked up in your `XDG_DATA_DIRS`, not the
-greeter user's.
+`[auth] user`; sessions are looked up in your `XDG_DATA_DIRS`, not the
+greeter user's; and it runs as you, reading files with your permissions
+and finding icons in your icon theme and directories. A picture,
+stylesheet or layout under your home passes here and fails at the login
+screen: keep them where the greeter user can read them
+(`/etc/greetd/hypred-greeter`, `/usr/share`), and when the layout names
+theme icons, set `[gtk] icon-theme` to a theme installed system-wide.
 
 ### config.toml
 

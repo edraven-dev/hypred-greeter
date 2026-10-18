@@ -16,7 +16,9 @@ usage: hypred-greeter [options]
                     greetd would (no remembered user) and build the widgets
                     (no window, no greetd, no label commands); print every
                     problem, exit 1 if there is one. Needs a display: run it
-                    before logging out onto a new config or package
+                    before logging out onto a new config or package. It
+                    runs as you: a file or icon theme only you can reach
+                    passes here and fails at the login screen
   --version         print version and exit
   --help            this text";
 
