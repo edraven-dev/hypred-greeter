@@ -1,7 +1,8 @@
 # hypred-greeter configuration. Every key is optional; this file documents
-# the defaults. Relative [paths] entries resolve against this file's
-# directory (/etc/greetd/hypred-greeter/). A broken config never blocks
-# login: problems fall back to defaults and show up in an on-screen banner.
+# the defaults. Relative paths ([paths], [background] image) resolve against
+# this file's directory (/etc/greetd/hypred-greeter/). A broken config never
+# blocks login: problems fall back to defaults and show up in an on-screen
+# banner.
 
 [paths]
 layout = "layout.toml"     # widget tree; missing file → built-in layout
@@ -17,6 +18,8 @@ fit = "cover"              # cover | contain | fill | scale-down
 # Unset keys leave the GTK defaults alone. `dark` is GTK's colour scheme:
 # the theme's dark or light variant, and (GTK 4.20+) what
 # @media (prefers-color-scheme: dark) in the stylesheet matches.
+# A blank slate is the theme "Empty": the stylesheet owns the whole look,
+# and GTK's own scheme stays light (the stylesheet's @media sees `dark`).
 # dark = true
 # theme = "adw-gtk3-dark"
 # icon-theme = "Papirus-Dark"
@@ -24,19 +27,21 @@ fit = "cover"              # cover | contain | fill | scale-down
 # font = "Cantarell 14"
 
 [auth]
-# Open the PAM conversation as soon as a username is known (the remembered
-# user at startup, or when the username entry settles) instead of at the
-# first password submit. With pam_fprintd ahead of the password modules this
-# arms the fingerprint reader the moment the greeter appears. Eager
-# conversations get cancelled (restarts, username changes) — carry the PAM
-# stack from README "Fingerprint" before enabling, or faillock counts each
-# cancel as a failed login.
+# Open the PAM conversation as soon as a username is known (the user shown
+# at startup, the username entry once it settles, a pick in a username
+# picker) instead of at the first password submit. With pam_fprintd ahead
+# of the password modules this arms the fingerprint reader the moment the
+# greeter appears. Eager conversations get cancelled (restarts, username
+# changes) — carry the PAM stack from README "Fingerprint" before enabling,
+# or faillock counts each cancel as a failed login.
 eager = false
 # When a conversation parked at the password prompt is restarted so the
-# reader re-arms (pam_fprintd gives up after its timeout; only a fresh
-# conversation arms it again): "always" — after every timed-out cycle, so a
-# touch logs in whenever you walk up; N — for N seconds after the last
-# input, then on the next input; 0 — never.
+# reader re-arms (pam_fprintd gives up after its timeout or max-tries; only
+# a fresh conversation arms it again): "always" — after every cycle that ran
+# out, so a touch logs in whenever you walk up; N — for N seconds after the
+# last input, then on the next input; 0 — never. Nothing re-arms during a
+# fingerprint cool-down (below) or the 31 s wait-out of a reader that never
+# gets to wait (README "Fingerprint").
 rearm-window = 0
 # The username shown when nothing is remembered yet (a layout without a
 # `username` widget needs one).
@@ -48,7 +53,7 @@ fixed-user = false
 # for this many seconds after the last input.
 typing-hold = 30
 # How long the username entry has to settle before an eager conversation
-# opens for the name typed.
+# opens for the name typed (a pick in a picker opens one at once).
 username-debounce-ms = 400
 # Fingerprint scans that fail to match (pam_fprintd's "Failed to match
 # fingerprint") within fingerprint-cooldown seconds, counted by this greeter
@@ -69,12 +74,13 @@ poweroff = ["systemctl", "poweroff"]
 # suspend = ["systemctl", "suspend"]
 
 [keys]
-# A key as GTK writes it → an action, named as a `button` names it: cancel,
-# next-session, prev-session, focus-username, focus-password, or a
-# [commands] name. Works whatever widget has the focus, but not while a
-# dropdown's list or a right-click menu is open; a key an entry takes as
-# input (a character, Enter, Tab, Backspace, Delete, Escape) needs
-# <Control>, <Alt> or <Super>. Held down, a key runs its command once.
+# None by default. A key as GTK writes it → an action, named as a `button`
+# names it: cancel, next-session, prev-session, focus-username,
+# focus-password, or a [commands] name. Works whatever widget has the
+# focus, but not while a dropdown's list or a right-click menu is open; a
+# key an entry takes as input (a character, Enter, Tab, Backspace, Delete,
+# Escape) needs <Control>, <Alt> or <Super>. Held down, a key runs its
+# command once.
 # "<Control><Alt>Delete" = "reboot"
 # F2 = "next-session"
 
@@ -99,13 +105,15 @@ x11-suffix = " (X11)"
 # "wayland/hyprland-uwsm" = "Hyprland"
 
 [texts]
-# The greeter's own messages; {program} and {error} are filled in.
+# The greeter's own messages.
 enter-username = "enter a username"
 username-changed = "username changed — enter the password again"
+# When greetd's error has no text.
 auth-failed = "authentication failed"
 # A power, button or [keys] command that cannot start, or exits
-# unsuccessfully within 10 s ({error} is then "exit status: 1", say); not
-# for a run less than 2 s after the last of the same command.
+# unsuccessfully within 10 s; {program} and {error} ("exit status: 1", say)
+# are filled in. Not for a run less than 2 s after the last of the same
+# command.
 power-failed = "{program}: {error}"
 # Shown during a fingerprint cool-down ([auth] fingerprint-misses), and for
 # a login refused in one.

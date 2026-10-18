@@ -26,7 +26,7 @@ Not on the AUR — build with `makepkg` straight from a clone:
 ```sh
 git clone https://github.com/edraven-dev/hypred-greeter.git
 cd hypred-greeter/pkg
-makepkg -si -p PKGBUILD-git   # or PKGBUILD to build the pinned v0.3.0 release
+makepkg -si -p PKGBUILD-git   # or PKGBUILD for the release it pins
 ```
 
 Point greetd at it in `/etc/greetd/config.toml`. Under
@@ -45,7 +45,8 @@ chosen session only after the greeter command exits).
 Either way its log is in the journal: `journalctl -t hypred-greeter`. The
 greeter writes stderr, and when that is not the journal already — a
 compositor's `exec` hands it `/dev/null`, greetd a VT — it sends each line,
-GTK's warnings included, to journald itself (`--demo` writes stderr only).
+GTK's warnings included, to journald itself (`--demo` and `--check` write
+stderr only).
 
 ## Configuration
 
@@ -131,7 +132,9 @@ text = 'Your \1 \2, please'
 `error` is a PAM message mid-conversation, `failure` the error a
 conversation ends in (see "Two kinds of error" below). A dropped info or
 error is not shown at all; a dropped prompt or failure goes out with an
-empty text (the entry is still cleared and refocused).
+empty text: the prompt is still answered in the password entry (which,
+with `prompt-placeholder`, keeps its own placeholder), the failure still
+clears and refocuses it.
 
 ### layout.toml — the widget tree
 
@@ -291,7 +294,7 @@ message label:
 | class | while |
 |---|---|
 | `.hg-busy` | a submitted password is on its way |
-| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
+| `.hg-failed` | after an auth error or a PAM error message (or one of the greeter's own: a failed command, `fingerprint-locked`): for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
 | `.hg-prompt-visible` | a visible (non-secret) prompt is pending, such as an OTP's "Token:" — style its answer (`.hg-prompt-visible entry.hg-password { font-family: monospace; }`); off again at a secret prompt, a submission, an auth error, a re-arm, and when the conversation is dropped (a failed command's error leaves it on: the prompt still waits) |
 | `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in (never while `.hg-fingerprint-locked`) |
@@ -318,11 +321,13 @@ GTK 4.22 and 4.24):
 | `dropdown.hg-session popover listview > row` (+ `:selected`, `:hover`), `dropdown.hg-session popover listview > row image` | a list row; its checkmark |
 | `entry.hg-password:focus-within`, `button:focus-visible` | focus — draw the ring with `outline` and `outline-offset` |
 
-GTK sets `:focus-within`, and after keyboard use `:focus-visible`, on every
-ancestor of the focused widget too: `*:focus-visible` rings the card and the
-window along with the button that has the focus. Scope a ring by the node
-that takes the focus — `button:focus-visible` for buttons and the pickers'
-buttons, `entry:focus-within` for entries (the `text` inside takes it).
+A `username` dropdown (`dropdown.hg-username`) has the same parts as the
+session one. GTK sets `:focus-within`, and after keyboard use
+`:focus-visible`, on every ancestor of the focused widget too:
+`*:focus-visible` rings the card and the window along with the button that
+has the focus. Scope a ring by the node that takes the focus —
+`button:focus-visible` for buttons and the pickers' buttons,
+`entry:focus-within` for entries (the `text` inside takes it).
 
 ### What GTK CSS does not do
 
@@ -370,9 +375,10 @@ possible later without breaking existing widgets.
   error path.
 - **Two kinds of error**: a PAM error message mid-conversation ("Failed to
   match fingerprint") is `PamError` — shown in red for at least 1.5 s
-  (`error-hold-ms`), the entry is left alone, the conversation goes on. Only a failed conversation
-  you submitted to (`AuthError`) clears and refocuses the password entry; one
-  that fails on its own (pam_nologin) is reported like a PAM error.
+  (`error-hold-ms`), the entry is left alone, the conversation goes on.
+  Only a failed conversation you submitted to (`AuthError`) clears and
+  refocuses the password entry; one that fails on its own (pam_nologin) is
+  reported like a PAM error.
 - **State**: `/var/lib/hypred-greeter/state-vt<N>.toml` — one file per VT
   greetd runs the greeter on (`state.toml` without a VT), so a second greetd
   instance for a second user keeps its own memory — remembers the last user
@@ -401,22 +407,24 @@ possible later without breaking existing widgets.
 
 With `pam_fprintd.so` ahead of the password modules in `/etc/pam.d/greetd`,
 `[auth] eager = true` opens the PAM conversation as soon as a username is
-known — the remembered user at startup, or the username entry once typing
-settles (`username-debounce-ms`, 400 ms) or on Enter — so the reader is
-armed the moment the greeter appears.
+known — the user shown at startup (remembered, or `[auth] user`), the
+username entry once typing settles (`username-debounce-ms`, 400 ms) or on
+Enter, or a pick in a `username` picker — so the reader is armed the moment
+the greeter appears.
 
 **With a remembered user and session a touch is the whole login** — no
 Enter, no click, no key: the greeter comes up with both preselected (the
 state file is written at every login; `[sessions] default` covers a user
 with no session remembered yet) and the reader armed, and a matching touch
-starts that session. `rearm-window = "always"` keeps it that way for
-as long as the greeter is up. Typing the password works as usual; the
-message widget shows pam_fprintd's own texts ("Place your right thumb on
-...", "Failed to match fingerprint", "Verification timed out"). A touch
-starts the session selected at that moment, so pick another first if you
-want it. The conversation always belongs to the name shown: editing the
-username starts a new one, clearing it ends it, and a login that completes
-for a name no longer shown starts nothing.
+starts that session. `rearm-window = "always"` keeps it that way for as
+long as the greeter is up, short of a cool-down or a wait-out (below).
+Typing the password works as usual; the message widget shows pam_fprintd's
+own texts ("Place your right thumb on ...", "Failed to match fingerprint",
+"Verification timed out"). A touch starts the session selected at that
+moment, so pick another first if you want it. The conversation always
+belongs to the name shown: editing the username starts a new one, clearing
+it ends it, and a login that completes for a name no longer shown starts
+nothing.
 
 What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.3):
 
@@ -443,12 +451,13 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.3):
   Typing into the password entry pauses all of it: while the entry holds
   text the parked prompt is kept ready, so a password typed then goes
   through at once — for `typing-hold` (30 s) after the last key; a stray
-  character left in the entry does not switch the reader off for good. A conversation that
-  ends without a fingerprint cycle — a failed login, or a park at once
-  because the reader was claimed elsewhere or not up yet — is reopened by
-  timer, so a touch works again without any input: after 3 s, doubling up
-  to 60 s, three tries; under `"always"` without a limit, and a busy reader
-  is retried every 6 s at most. None of these timers run with `0`.
+  character left in the entry does not switch the reader off for good. A
+  conversation that ends without a fingerprint cycle — a failed login, or
+  a park at once because the reader was claimed elsewhere or not up yet —
+  is reopened by timer, so a touch works again without any input: after
+  3 s, doubling up to 60 s, three tries; under `"always"` without a limit,
+  and a busy reader is retried every 6 s at most (three parks at once in a
+  row are waited out, next). None of these timers run with `0`.
 - **A reader that never gets to wait is waited out.** Three passive
   conversations in a row for one name that reach a prompt without a
   fingerprint wait (nothing said first, or the prompt within a second of
