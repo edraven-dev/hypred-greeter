@@ -4,7 +4,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -183,7 +183,7 @@ pub fn shortcuts(
 
     let controller = gtk::ShortcutController::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let (bindings, found) = bind(&config.keys, &config.commands, |key| {
+    let (bindings, found) = bind(&config.keys.0, &config.commands, |key| {
         let trigger = gtk::ShortcutTrigger::parse_string(key)
             .ok_or("not a key GTK can read (write it like \"<Control><Alt>Delete\" or \"F2\")")?;
         if types_into_entries(&trigger) {
@@ -208,9 +208,9 @@ pub fn shortcuts(
     [controller.upcast(), keys.upcast()]
 }
 
-/// A key spelt twice (`<Ctrl>r`, `<Control>r`) keeps the first.
+/// A key spelt twice (`<Ctrl>r`, `<Control>r`) keeps the first in the file.
 fn bind<T: ToString>(
-    keys: &BTreeMap<String, String>,
+    keys: &[(String, String)],
     commands: &Commands,
     parse: impl Fn(&str) -> Result<T, &'static str>,
 ) -> (Vec<(T, Action)>, Vec<String>) {
@@ -411,12 +411,12 @@ mod tests {
     }
 
     /// Stands in for GTK's parser, which needs a display: `Atl` is a typo,
-    /// case does not matter.
+    /// case does not matter and `<Ctrl>` is `<Control>`.
     fn parse(key: &str) -> Result<String, &'static str> {
         if key.contains("Atl") {
             Err("unreadable")
         } else {
-            Ok(key.to_lowercase())
+            Ok(key.to_lowercase().replace("<ctrl>", "<control>"))
         }
     }
 
@@ -428,32 +428,39 @@ mod tests {
              \"<Super>s\" = \"suspend\"\nF3 = \"nope\"\n\"<Control><Atl>Delete\" = \"reboot\"\n",
         )
         .unwrap();
-        let (bindings, problems) = bind(&config.keys, &config.commands, parse);
+        let (bindings, problems) = bind(&config.keys.0, &config.commands, parse);
         assert_eq!(
             bindings,
             [
                 ("<control><alt>delete".to_string(), Action::Run(argv(&["systemctl", "reboot"]))),
-                ("<super>s".to_string(), Action::Run(argv(&["systemctl", "suspend"]))),
                 ("f2".to_string(), Action::NextSession),
+                ("<super>s".to_string(), Action::Run(argv(&["systemctl", "suspend"]))),
             ]
         );
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert_eq!(problems[0], "keys `<Control><Atl>Delete`: unreadable");
         assert!(
-            problems[1].starts_with("keys `F3`: unknown action `nope` (built-in:"),
+            problems[0].starts_with("keys `F3`: unknown action `nope` (built-in:"),
             "{problems:?}"
         );
+        assert_eq!(problems[1], "keys `<Control><Atl>Delete`: unreadable");
     }
 
     #[test]
-    fn a_key_bound_twice_keeps_the_first() {
-        let config: Config =
-            toml::from_str("[keys]\n\"<Control>r\" = \"reboot\"\n\"<control>R\" = \"cancel\"\n")
-                .unwrap();
-        let (bindings, problems) = bind(&config.keys, &config.commands, parse);
-        let reboot = Action::Run(argv(&["systemctl", "reboot"]));
-        assert_eq!(bindings, [("<control>r".to_string(), reboot)]);
-        assert_eq!(problems, ["keys `<control>R`: the same key as `<Control>r`, which wins"]);
+    fn a_key_bound_twice_keeps_the_first_in_the_file() {
+        let config: Config = toml::from_str(
+            "[keys]\n\"<Ctrl>r\" = \"cancel\"\n\"<Control>r\" = \"reboot\"\n\
+             \"<control>R\" = \"next-session\"\n",
+        )
+        .unwrap();
+        let (bindings, problems) = bind(&config.keys.0, &config.commands, parse);
+        assert_eq!(bindings, [("<control>r".to_string(), Action::Cancel)]);
+        assert_eq!(
+            problems,
+            [
+                "keys `<Control>r`: the same key as `<Ctrl>r`, which wins",
+                "keys `<control>R`: the same key as `<Ctrl>r`, which wins",
+            ]
+        );
     }
 
     #[test]

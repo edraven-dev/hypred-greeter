@@ -1,6 +1,6 @@
 use gtk4::glib;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_PATH: &str = "/etc/greetd/hypred-greeter/config.toml";
@@ -13,8 +13,7 @@ pub struct Config {
     pub gtk: Gtk,
     pub auth: Auth,
     pub commands: Commands,
-    /// Accelerator as GTK reads it → action name.
-    pub keys: BTreeMap<String, String>,
+    pub keys: Keys,
     pub sessions: Sessions,
     pub texts: Texts,
 }
@@ -183,6 +182,36 @@ impl<'de> Deserialize<'de> for Commands {
         let mut commands = Self::default();
         commands.0.extend(HashMap::<String, Vec<String>>::deserialize(deserializer)?);
         Ok(commands)
+    }
+}
+
+/// `[keys]`: accelerator as GTK reads it → action name, in file order (toml
+/// keeps it with `preserve_order`), so of two spellings of one key the
+/// first written wins.
+#[derive(Debug, Default)]
+pub struct Keys(pub Vec<(String, String)>);
+
+impl<'de> Deserialize<'de> for Keys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Keys;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a table of \"key\" = \"action\"")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    keys.push(entry);
+                }
+                Ok(Keys(keys))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
     }
 }
 
@@ -455,18 +484,18 @@ mod tests {
     }
 
     #[test]
-    fn keys_keep_their_accelerators_verbatim() {
-        let text = "[keys]\n\"<Control><Alt>Delete\" = \"reboot\"\nF2 = \"next-session\"\n\
-                    \"<Super>s\" = \"suspend\"\n";
+    fn keys_keep_their_accelerators_verbatim_and_in_file_order() {
+        let text = "[keys]\n\"<Super>s\" = \"suspend\"\n\"<Control><Alt>Delete\" = \"reboot\"\n\
+                    F2 = \"next-session\"\n";
         let (config, unknown) = parse(text).unwrap();
         assert!(unknown.is_empty(), "{unknown:?}");
         let keys: Vec<(&str, &str)> =
-            config.keys.iter().map(|(key, action)| (key.as_str(), action.as_str())).collect();
+            config.keys.0.iter().map(|(key, action)| (key.as_str(), action.as_str())).collect();
         assert_eq!(
             keys,
-            [("<Control><Alt>Delete", "reboot"), ("<Super>s", "suspend"), ("F2", "next-session")]
+            [("<Super>s", "suspend"), ("<Control><Alt>Delete", "reboot"), ("F2", "next-session")]
         );
-        assert!(parse("").unwrap().0.keys.is_empty());
+        assert!(parse("").unwrap().0.keys.0.is_empty());
         assert!(parse("[keys]\nF2 = 2\n").is_err());
     }
 
