@@ -48,8 +48,8 @@ impl Backend for GreetdBackend {
 /// Accepts any password except "fail"; username "mfa" walks the
 /// visible-prompt + info path, "fprint" a fingerprint cycle whose first
 /// info ack blocks like greetd does while pam_fprintd waits and then times
-/// out, "touch" the same cycle ending in a match, "nomatch" three scans
-/// that fail to match. Never starts anything.
+/// out, "touch" the same cycle ending in a match, "miss" three scans that
+/// fail to match (pam_fprintd's max-tries). Never starts anything.
 pub struct DemoBackend {
     /// Popped back-to-front; `true`: the ack of that message blocks for
     /// the fingerprint wait.
@@ -100,7 +100,7 @@ impl Backend for DemoBackend {
                         (Info, PLACE, true),
                     ],
                     "touch" => vec![(Info, PLACE, true)],
-                    "nomatch" => vec![
+                    "miss" => vec![
                         (Secret, "Password:", false),
                         MISS,
                         (Info, PLACE, true),
@@ -347,10 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn the_demo_nomatch_user_misses_three_scans_then_asks_for_the_password() {
+    fn the_demo_miss_user_misses_three_scans_then_asks_for_the_password() {
         let mut demo = DemoBackend::with_fingerprint_wait(Duration::from_millis(1));
         let mut said = Vec::new();
-        let mut response = demo.roundtrip(Request::CreateSession { username: "nomatch".into() });
+        let mut response = demo.roundtrip(Request::CreateSession { username: "miss".into() });
         while let Ok(Response::AuthMessage { auth_message_type, auth_message }) = response {
             said.push(format!("{auth_message_type:?} {auth_message}"));
             if matches!(auth_message_type, AuthMessageType::Secret) {
