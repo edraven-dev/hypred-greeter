@@ -134,12 +134,19 @@ regex = true                         # \1 references in text
 text = 'Your \1 \2, please'
 ```
 
-`error` is a PAM message mid-conversation, `failure` the error a
-conversation ends in (see "Two kinds of error" below). A dropped info or
-error is not shown at all; a dropped prompt or failure goes out with an
-empty text: the prompt is still answered in the password entry (which,
-with `prompt-placeholder`, keeps its own placeholder), the failure still
-clears and refocuses it.
+The kinds (see "Two kinds of error" below): `info` — PAM's info messages
+and `--demo`'s notices; `prompt` — PAM's prompts; `error` — PAM's error
+messages, a conversation that fails on its own (pam_nologin), and the
+greeter's `power-failed` and `fingerprint-locked` (a login refused in a
+cool-down included); `failure` — the error a conversation you submitted to
+ends in (greetd's text, or `auth-failed`), and the greeter's
+`enter-username` and `username-changed`. Anchor a rule on the message it
+is for: `match = "Failed to match"` rewrites pam_fprintd's miss alone,
+where `"fingerprint"` would rewrite `fingerprint-locked` too. A dropped
+info or error is not shown at all; a dropped prompt or failure goes out
+with an empty text: the prompt is still answered in the password entry
+(which, with `prompt-placeholder`, keeps its own placeholder), the failure
+still clears and refocuses it.
 
 ### layout.toml — the widget tree
 

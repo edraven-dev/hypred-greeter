@@ -284,8 +284,10 @@ pub struct Rewrite {
     compiled: std::cell::OnceCell<Result<glib::Regex, String>>,
 }
 
-/// `error`: a PAM message mid-conversation; `failure`: a conversation
-/// that ended in an error.
+/// `error`: a PAM error message, a conversation that failed on its own,
+/// power-failed and fingerprint-locked; `failure`: the end of a
+/// conversation the user submitted to, enter-username and
+/// username-changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextKind {

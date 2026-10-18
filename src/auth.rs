@@ -2062,6 +2062,35 @@ mod tests {
     }
 
     #[test]
+    fn the_greeters_own_texts_and_a_failure_on_its_own_have_the_kinds_documented() {
+        let texts = || {
+            rules(
+                "[[rewrite]]\nmatch = \"too many\"\ntext = \"locked\"\nkind = \"error\"\n\
+                 [[rewrite]]\nmatch = \"nologin\"\ntext = \"closed\"\nkind = \"error\"\n\
+                 [[rewrite]]\nmatch = \"username\"\ntext = \"who?\"\nkind = \"failure\"\n",
+            )
+        };
+        let (backend, _, _) = scripted(three_no_matches);
+        let log = drive_texts(backend, capped(1), texts(), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        assert!(log.contains(&"pamerror locked".to_string()), "{log:?}");
+        let (backend, _, _) = scripted(|_| vec![Step::Fail("nologin")]);
+        let log = drive_texts(backend, eager(0), texts(), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        assert!(log.contains(&"pamerror closed".to_string()), "{log:?}");
+        let (backend, _, _) = scripted(password_only);
+        let log = drive_texts(backend, config::Auth::default(), texts(), |auth, pump| {
+            auth.begin(String::new(), "pw".into());
+            pump();
+        });
+        assert_eq!(log[0], "autherror who?", "{log:?}");
+    }
+
+    #[test]
     fn the_built_in_texts_come_from_config() {
         let texts = rules("enter-username = \"Wer bist du?\"\n");
         let log = drive_texts(

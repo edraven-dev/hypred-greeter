@@ -123,7 +123,12 @@ fingerprint-locked = "too many fingerprint attempts — use your password"
 # failures: the first rule whose `match` is found in the text (a
 # substring; with `regex = true` a glib::Regex pattern, `\1` references
 # allowed in `text`) replaces it with `text`; "" drops the message; `kind`
-# (info | error | prompt | failure) limits a rule to one kind.
+# limits a rule to one kind: info (PAM's, --demo's notices), prompt, error
+# (PAM's errors, a conversation failing on its own, power-failed,
+# fingerprint-locked) or failure (the end of a conversation you submitted
+# to, enter-username, username-changed). Anchor a rule on the message it
+# is for: "Failed to match", not "fingerprint", which fingerprint-locked
+# has too.
 # [[texts.rewrite]]
 # match = "Place your"
 # text = "Touch the fingerprint reader"
