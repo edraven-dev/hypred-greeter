@@ -9,6 +9,7 @@
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use std::cell::Cell;
+use std::rc::Rc;
 
 use crate::layout::Node;
 use crate::ui::bus::{FocusTarget, UiEvent};
@@ -25,7 +26,7 @@ impl WidgetDef for PasswordDef {
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
         let placeholder = node.props.str_or("placeholder", "password")?;
         let prompt_placeholder = node.props.bool("prompt-placeholder")?.unwrap_or(false);
-        let mask_visible = mask_visible(node)?;
+        let mask = (!mask_visible(node)?).then(|| Rc::new(Cell::new(Mask::default())));
         let mask_char = invisible_char(node)?;
         let entry = gtk::PasswordEntry::builder()
             .placeholder_text(placeholder.as_str())
@@ -38,7 +39,13 @@ impl WidgetDef for PasswordDef {
         }
 
         let app = ctx.app.clone();
-        entry.connect_changed(move |entry| app.auth.set_typing(!entry.text().is_empty()));
+        let edits = mask.clone();
+        entry.connect_changed(move |entry| {
+            app.auth.set_typing(!entry.text().is_empty());
+            if let Some(mask) = &edits {
+                mask_step(entry, mask, Mask::edited);
+            }
+        });
 
         let app = ctx.app.clone();
         entry.connect_activate(move |entry| {
@@ -67,16 +74,12 @@ impl WidgetDef for PasswordDef {
         entry.add_controller(keys);
 
         let weak = entry.downgrade();
-        let unmasked = Cell::new(false);
         ctx.bus.subscribe(move |event| {
             let Some(entry) = weak.upgrade() else { return };
-            if !mask_visible {
-                if let (Some(clear), Some(text)) =
-                    (in_clear(event, unmasked.get()), text_of(&entry))
-                {
-                    text.set_visibility(clear);
-                    unmasked.set(clear);
-                }
+            // Before the match: an AuthError's wipe is an edit, and must
+            // find the prompt already over.
+            if let Some(mask) = &mask {
+                mask_step(&entry, mask, |mask, empty, shown| mask.event(event, empty, shown));
             }
             if prompt_placeholder {
                 if let Some(prompt) = placeholder_after(event) {
@@ -156,28 +159,73 @@ fn placeholder_after(event: &UiEvent) -> Option<Option<&str>> {
     }
 }
 
-/// With `mask-visible = false`: whether the entry shows its text in clear
-/// after `event`, `unmasked` saying a visible prompt made it do so; `None`
-/// leaves it as it is. The answer to a visible prompt is shown until that
-/// prompt ends (a re-arm ends a parked one with nothing but `Armed`, and a
-/// password typed during the next fingerprint wait must not show); text
-/// the peek icon revealed is the user's and stays.
-fn in_clear(event: &UiEvent, unmasked: bool) -> Option<bool> {
-    match event {
-        UiEvent::Prompt { secret: false, .. } => Some(true),
-        UiEvent::Prompt { secret: true, .. }
-        | UiEvent::Busy(true)
-        | UiEvent::AuthError(_)
-        | UiEvent::Armed(true) => unmasked.then_some(false),
-        UiEvent::Info(text) if text.is_empty() => unmasked.then_some(false),
-        UiEvent::Info(_)
-        | UiEvent::Busy(false)
-        | UiEvent::PamError(_)
-        | UiEvent::SessionChanged(_)
-        | UiEvent::Armed(false)
-        | UiEvent::Starting
-        | UiEvent::Focus(_)
-        | UiEvent::UsernameChanged(_) => None,
+/// One `step` of `mask` on the entry's GtkText.
+fn mask_step(
+    entry: &gtk::PasswordEntry,
+    mask: &Cell<Mask>,
+    step: impl FnOnce(&mut Mask, bool, bool) -> Option<bool>,
+) {
+    let Some(text) = text_of(entry) else { return };
+    let mut state = mask.get();
+    let change = step(&mut state, entry.text().is_empty(), text.property("visibility"));
+    mask.set(state);
+    if let Some(visible) = change {
+        text.set_visibility(visible);
+    }
+}
+
+/// With `mask-visible = false`: when the entry shows its text in clear.
+/// Only a visible prompt's answer does, what is typed into the empty entry
+/// while that prompt is pending: a password typed before it came (during a
+/// fingerprint wait) stays masked. PAM cannot send an error while a prompt
+/// waits, and one of the greeter's own (a failed command) leaves the
+/// prompt pending. What the peek icon shows is the user's and stays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Mask {
+    /// A visible prompt is pending.
+    prompt: bool,
+    /// Its answer shows in clear by this rather than by the peek icon.
+    unmasked: bool,
+}
+
+impl Mask {
+    /// `Some(visible)` to switch the mask after `event`; `empty` and
+    /// `shown`: whether the entry holds nothing, and shows what it holds.
+    fn event(&mut self, event: &UiEvent, empty: bool, shown: bool) -> Option<bool> {
+        match event {
+            UiEvent::Prompt { secret: false, .. } => {
+                self.prompt = true;
+                self.edited(empty, shown)
+            }
+            UiEvent::Prompt { secret: true, .. }
+            | UiEvent::Busy(true)
+            | UiEvent::AuthError(_)
+            | UiEvent::Armed(true) => self.end(),
+            UiEvent::Info(text) if text.is_empty() => self.end(),
+            UiEvent::Info(_)
+            | UiEvent::Busy(false)
+            | UiEvent::PamError(_)
+            | UiEvent::SessionChanged(_)
+            | UiEvent::Armed(false)
+            | UiEvent::Starting
+            | UiEvent::Focus(_)
+            | UiEvent::UsernameChanged(_) => None,
+        }
+    }
+
+    /// The entry's text changed: emptied while a visible prompt waits, what
+    /// is typed next is its answer.
+    fn edited(&mut self, empty: bool, shown: bool) -> Option<bool> {
+        if !self.prompt || self.unmasked || !empty || shown {
+            return None;
+        }
+        self.unmasked = true;
+        Some(true)
+    }
+
+    fn end(&mut self) -> Option<bool> {
+        self.prompt = false;
+        std::mem::take(&mut self.unmasked).then_some(false)
     }
 }
 
@@ -243,36 +291,97 @@ mod tests {
         }
     }
 
+    /// The entry as [`Mask`] and the user leave it, from empty and masked.
+    #[derive(Default)]
+    struct Entry {
+        mask: Mask,
+        text: String,
+        shown: bool,
+    }
+
+    impl Entry {
+        fn on(&mut self, event: &UiEvent) -> &mut Self {
+            let change = self.mask.event(event, self.text.is_empty(), self.shown);
+            self.shown = change.unwrap_or(self.shown);
+            self
+        }
+
+        fn holds(&mut self, text: &str) -> &mut Self {
+            self.text = text.into();
+            self.shown = self.mask.edited(self.text.is_empty(), self.shown).unwrap_or(self.shown);
+            self
+        }
+
+        fn peek(&mut self) -> &mut Self {
+            self.shown = !self.shown;
+            self
+        }
+    }
+
+    fn visible(passive: bool) -> UiEvent {
+        UiEvent::Prompt { secret: false, text: "Token:".into(), passive }
+    }
+
     #[test]
     fn a_visible_prompts_answer_is_in_clear_until_the_prompt_ends() {
-        let prompt = |secret, passive| UiEvent::Prompt { secret, text: "Token:".into(), passive };
-        for unmasked in [false, true] {
-            assert_eq!(in_clear(&prompt(false, false), unmasked), Some(true));
-            assert_eq!(in_clear(&prompt(false, true), unmasked), Some(true));
-        }
         let ends = [
-            prompt(true, false),
-            prompt(true, true),
+            UiEvent::Prompt { secret: true, text: "Password:".into(), passive: false },
+            UiEvent::Prompt { secret: true, text: "Password:".into(), passive: true },
             UiEvent::Busy(true),
             UiEvent::AuthError("demo: wrong password".into()),
             UiEvent::Info(String::new()),
+            // A re-arm ends a parked prompt with no other event.
             UiEvent::Armed(true),
         ];
-        for event in &ends {
-            assert_eq!(in_clear(event, true), Some(false), "{event:?}");
-            assert_eq!(in_clear(event, false), None, "a peek stays: {event:?}");
+        for passive in [false, true] {
+            for end in &ends {
+                let mut entry = Entry::default();
+                assert!(entry.on(&visible(passive)).holds("123456").shown, "{end:?}");
+                assert!(!entry.on(end).shown, "{end:?}");
+                assert!(!entry.holds("").holds("hunter2").shown, "over at {end:?}");
+            }
         }
         for event in [
             UiEvent::Info("demo: any token accepted".into()),
             UiEvent::Busy(false),
-            UiEvent::PamError("Failed to match fingerprint".into()),
+            // Only the greeter's own: a failed command.
+            UiEvent::PamError("could not run poweroff".into()),
             UiEvent::Armed(false),
             UiEvent::Starting,
             UiEvent::Focus(FocusTarget::Password),
             UiEvent::SessionChanged(0),
             UiEvent::UsernameChanged("mfa".into()),
         ] {
-            assert_eq!(in_clear(&event, true), None, "{event:?}");
+            let mut entry = Entry::default();
+            assert!(entry.on(&visible(false)).holds("12").on(&event).shown, "{event:?}");
         }
+    }
+
+    #[test]
+    fn text_typed_before_a_visible_prompt_stays_masked() {
+        let mut entry = Entry::default();
+        entry.holds("hunter2").on(&UiEvent::Info("Verification timed out".into()));
+        assert!(!entry.on(&visible(true)).shown);
+        assert!(!entry.holds("hunter").holds("h").shown);
+        assert!(entry.holds("").shown, "emptied, what comes next is the answer");
+        assert!(entry.holds("123456").shown);
+        assert!(!entry.on(&UiEvent::Busy(true)).shown);
+
+        let mut entry = Entry::default();
+        entry.on(&visible(true)).on(&UiEvent::Armed(true)).holds("hunter2");
+        assert!(!entry.on(&visible(true)).shown, "the next cycle's prompt");
+    }
+
+    #[test]
+    fn what_the_peek_icon_shows_stays() {
+        for before in ["", "hunter2"] {
+            let mut entry = Entry::default();
+            entry.holds(before).peek().on(&visible(false)).holds("123456");
+            assert!(entry.on(&UiEvent::Busy(true)).shown, "peeked at {before:?}");
+        }
+        let mut entry = Entry::default();
+        entry.on(&visible(false)).holds("123").peek().holds("").holds("123456");
+        assert!(!entry.shown, "hidden by the user");
+        assert!(!entry.on(&UiEvent::Busy(true)).shown);
     }
 }
