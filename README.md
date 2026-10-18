@@ -310,7 +310,7 @@ message label:
 ### Parts inside widgets
 
 GTK widgets are made of sub-nodes, addressable as descendants (verified on
-GTK 4.22):
+GTK 4.22 and 4.24):
 
 | selector | part |
 |---|---|
@@ -321,7 +321,13 @@ GTK 4.22):
 | `dropdown.hg-session > button`, `dropdown.hg-session > button arrow` | the picker's button and its arrow |
 | `dropdown.hg-session popover > contents` | the open list's frame |
 | `dropdown.hg-session popover listview > row` (+ `:selected`, `:hover`), `dropdown.hg-session popover listview > row image` | a list row; its checkmark |
-| `entry.hg-password:focus-within`, `*:focus-visible` | focus — draw the ring with `outline` and `outline-offset` |
+| `entry.hg-password:focus-within`, `button:focus-visible` | focus — draw the ring with `outline` and `outline-offset` |
+
+GTK sets `:focus-within`, and after keyboard use `:focus-visible`, on every
+ancestor of the focused widget too: `*:focus-visible` rings the card and the
+window along with the button that has the focus. Scope a ring by the node
+that takes the focus — `button:focus-visible` for buttons and the pickers'
+buttons, `entry:focus-within` for entries (the `text` inside takes it).
 
 ### What GTK CSS does not do
 
@@ -415,7 +421,7 @@ want it. The conversation always belongs to the name shown: editing the
 username starts a new one, clearing it ends it, and a login that completes
 for a name no longer shown starts nothing.
 
-What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
+What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.3):
 
 - **greetd processes one PAM step at a time.** While pam_fprintd waits for a
   finger, nothing the greeter sends is handled — a password typed meanwhile
