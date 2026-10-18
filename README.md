@@ -392,11 +392,13 @@ possible later without breaking existing widgets.
   `[sessions] only`/`hide`/`order`/`names` make of the list is what every
   picker, `{session}` placeholder and the remembered-session lookup see.
 - **A layout must allow a login.** One without a `password` widget, or
-  whose `password` widget fails to build (a bad property), is replaced by
-  the built-in layout, with a banner line saying why; so is one without a
-  `username` widget, unless a username resolves (remembered, or
-  `[auth] user`). `--demo` skips this guard and shows the layout as it
-  is; `--check` applies it, as the login screen does.
+  whose `password` widget is not built (a bad property, or a container
+  around it that fails), is replaced by the built-in layout, with a banner
+  line saying why; so is one without a `username` widget, or whose
+  `username` widget is not built (a container around it that fails),
+  unless a username resolves (remembered, or `[auth] user`). `--demo`
+  skips this guard and shows the layout as it is; `--check` applies it, as
+  the login screen does.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
   transport failure, `101` panic; with `--check`, `0` nothing to report and
@@ -634,8 +636,10 @@ No 0.3 key or property is gone or renamed. What behaves differently:
   reported only one that could not start.
 - **A `password` widget that fails to build** (a bad property) makes the
   layout fall back to the built-in one, with a banner line — 0.3 left its
-  ⚠ placeholder and no way to type a password. A `username` widget skips
-  a property it cannot use instead of failing.
+  ⚠ placeholder and no way to type a password. So does a container that
+  fails around the `password` widget, or around the `username` widget
+  while no user is known. A `username` widget skips a property it cannot
+  use instead of failing.
 - **Label command output** keeps `{{` and `}}` as they are (0.3 made each
   one brace), and under `markup` a placeholder's value no longer fails the
   build check (`{time:%d & %m}`).

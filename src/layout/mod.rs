@@ -220,6 +220,18 @@ fn login_possible(root: &Node, require_auth: bool, known_user: bool) -> Result<(
     }
 }
 
+/// After the build: a widget the tree names may still be missing, a ⚠
+/// placeholder (a bad property) or never built (its container failed).
+pub fn login_built(password: bool, username: bool, known_user: bool) -> Result<(), &'static str> {
+    if !password {
+        Err("the `password` widget failed to build")
+    } else if !username && !known_user {
+        Err("the `username` widget was not built and no user is known")
+    } else {
+        Ok(())
+    }
+}
+
 pub fn contains_kind(node: &Node, kind: &str) -> bool {
     any(node, &|node| node.kind == kind)
 }
@@ -257,6 +269,17 @@ mod tests {
         let text = "[root]\nwidget = \"username\"\n";
         let root = parse_str(text, &mut problems).unwrap();
         assert_eq!(login_possible(&root, true, true), Err("layout has no `password` widget"));
+    }
+
+    #[test]
+    fn a_login_needs_a_built_password_and_a_built_username_or_a_known_user() {
+        assert_eq!(login_built(true, true, false), Ok(()));
+        assert_eq!(login_built(true, false, true), Ok(()));
+        let password = Err("the `password` widget failed to build");
+        assert_eq!(login_built(false, true, true), password);
+        assert_eq!(login_built(false, false, false), password);
+        let username = Err("the `username` widget was not built and no user is known");
+        assert_eq!(login_built(true, false, false), username);
     }
 
     #[test]

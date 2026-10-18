@@ -165,10 +165,14 @@ fn main() {
         let fallback;
         let mut tree = &layout.root;
         let mut root = layout::build::build_node(&ctx, tree);
-        // A password widget that fell back to the ⚠ placeholder (a bad
-        // property) would leave no way to log in.
-        if !args.demo && !ctx.built("password") {
-            ctx.problem("the `password` widget failed to build — using built-in layout".into());
+        let known_user = !handle.username().is_empty();
+        let built = if args.demo {
+            Ok(())
+        } else {
+            layout::login_built(ctx.built("password"), ctx.built("username"), known_user)
+        };
+        if let Err(why) = built {
+            ctx.problem(format!("{why} — using built-in layout"));
             fallback = layout::builtin();
             tree = &fallback;
             root = layout::build::build_node(&ctx, tree);
