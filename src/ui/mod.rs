@@ -15,6 +15,7 @@ use crate::ui::ctx::AppHandle;
 
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
 const COLOR_SCHEME: &str = "gtk-interface-color-scheme";
+const PREFERS_COLOR_SCHEME: &str = "prefers-color-scheme";
 /// Past this many CSS problems the banner only counts the rest.
 const CSS_PROBLEM_LINES: usize = 5;
 /// `.hg-failed` stays at least this long: the next input re-arms the reader
@@ -91,12 +92,9 @@ pub fn load_css(path: &Path) -> Vec<String> {
 /// sheet is parsed once.
 fn follow_color_scheme(settings: &gtk::Settings, provider: &gtk::CssProvider) {
     if settings.find_property(COLOR_SCHEME).is_some()
-        && provider.find_property("prefers-color-scheme").is_some()
+        && provider.find_property(PREFERS_COLOR_SCHEME).is_some()
     {
-        settings
-            .bind_property(COLOR_SCHEME, provider, "prefers-color-scheme")
-            .sync_create()
-            .build();
+        settings.bind_property(COLOR_SCHEME, provider, PREFERS_COLOR_SCHEME).sync_create().build();
     }
 }
 
@@ -414,9 +412,13 @@ fn set_color_scheme(settings: &gtk::Settings, dark: bool) {
     if let Some(scheme) = &scheme {
         settings.set_property_from_value(COLOR_SCHEME, scheme);
     }
-    if scheme.is_none() || gtk::check_version(4, 23, 0).is_some() {
+    if prefer_dark_too(scheme.is_some(), (gtk::major_version(), gtk::minor_version())) {
         settings.set_gtk_application_prefer_dark_theme(dark);
     }
+}
+
+fn prefer_dark_too(has_scheme: bool, gtk: (u32, u32)) -> bool {
+    !has_scheme || gtk < (4, 23)
 }
 
 /// By nick, from the enum behind `pspec`: the binding has no
@@ -513,6 +515,21 @@ mod tests {
                 Some(nick)
             );
         }
+        let provider = glib::Class::<gtk::CssProvider>::from_type(gtk::CssProvider::static_type());
+        let feature = provider.and_then(|class| class.find_property(PREFERS_COLOR_SCHEME));
+        let feature = feature.expect("a GTK with the setting has the media feature");
+        assert_eq!(feature.value_type(), pspec.value_type(), "a binding needs one type");
+    }
+
+    #[test]
+    fn prefer_dark_is_written_until_gtk_4_23() {
+        assert!(!prefer_dark_too(true, (4, 24)));
+        assert!(!prefer_dark_too(true, (4, 23)));
+        assert!(prefer_dark_too(true, (4, 22)));
+        assert!(prefer_dark_too(true, (4, 20)));
+        assert!(prefer_dark_too(false, (4, 18)));
+        assert!(prefer_dark_too(false, (4, 24)), "the scheme could not be written");
+        assert!(!prefer_dark_too(true, (5, 0)));
     }
 
     #[test]
