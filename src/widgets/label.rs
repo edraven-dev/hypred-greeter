@@ -58,21 +58,27 @@ impl Template {
                 continue;
             }
             let after = &rest[1..];
-            let end = after.find('}');
-            let name = &after[..end.unwrap_or(after.len())];
-            let hole = match (end, Self::hole(name)) {
-                (Some(_), Some(hole)) if !lenient || Self::exact(name, &hole) => hole,
+            // In data a `{` inside the braces makes the outer one plain
+            // text, so the name ends at either brace. Whatever it turns out
+            // to be, what was scanned is then consumed: one pass, however
+            // many braces a command prints.
+            let end = if lenient { after.find(['{', '}']) } else { after.find('}') };
+            let stop = end.unwrap_or(after.len());
+            let name = &after[..stop];
+            let closed = after[stop..].starts_with('}');
+            let hole = match (closed, Self::hole(name)) {
+                (true, Some(hole)) if !lenient || Self::exact(&hole) => hole,
                 _ if lenient => {
-                    literal.push('{');
-                    rest = after;
+                    literal.push_str(&rest[..1 + stop]);
+                    rest = &after[stop..];
                     continue;
                 }
-                (Some(_), _) => {
+                (true, _) => {
                     return Err(format!(
                         "unknown placeholder `{{{name}}}` (user, hostname, session, time:FORMAT)"
                     ))
                 }
-                (None, _) => {
+                (false, _) => {
                     return Err(format!("unclosed `{{{name}` (a literal brace is `{{{{`)"))
                 }
             };
@@ -97,14 +103,13 @@ impl Template {
         })
     }
 
-    /// In data a `{` inside the braces makes the outer one plain text, and
-    /// a time that cannot format stays as it was rather than going blank.
-    fn exact(name: &str, hole: &Placeholder) -> bool {
-        !name.contains('{')
-            && match hole {
-                Placeholder::Time(format) => clock::now(format).is_some(),
-                _ => true,
-            }
+    /// In data a time that cannot format stays as it was rather than going
+    /// blank.
+    fn exact(hole: &Placeholder) -> bool {
+        match hole {
+            Placeholder::Time(format) => clock::now(format).is_some(),
+            _ => true,
+        }
     }
 
     fn time_formats(&self) -> impl Iterator<Item = &str> {
@@ -397,6 +402,19 @@ mod tests {
         assert_eq!(Template::parse_lenient("{{{user}}}").render(fixed, false, true), "{{alice}}");
         let escaped = Template::parse_lenient("{{a}} & {user}").render(fixed, true, true);
         assert_eq!(escaped, "{{a}} &amp; alice");
+    }
+
+    #[test]
+    fn command_output_is_one_pass_however_many_braces_it_holds() {
+        // Searching on from every `{` for its `}` took seconds on these.
+        for unit in ["{a", "{time:%Q", r#"{"k":"#] {
+            let text = format!("{}}}", unit.repeat(250_000));
+            let started = std::time::Instant::now();
+            let template = Template::parse_lenient(&text);
+            let took = started.elapsed();
+            assert_eq!(template.render(fixed, false, true), text, "{unit}");
+            assert!(took < Duration::from_secs(1), "{unit}: {took:?}");
+        }
     }
 
     #[test]
