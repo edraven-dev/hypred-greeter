@@ -574,8 +574,7 @@ wait-out, which the log on stderr shows.
 
 ### From 0.3
 
-Every 0.3 key and property still means what it did. What behaves
-differently:
+No 0.3 key or property is gone or renamed. What behaves differently:
 
 - **`--style` and `--layout`** take a relative path from the current
   directory, as a shell would; 0.3 took it from the config's directory.
