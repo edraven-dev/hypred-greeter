@@ -56,7 +56,7 @@ fn main() {
         ui::apply_gtk_settings(&loaded.config.gtk);
         let style = loaded.resolve(args.style.as_deref(), &loaded.config.paths.style);
         let mut problems = loaded.problems.clone();
-        problems.extend(ui::load_css(&style));
+        problems.extend(ui::css_lines(ui::load_css(&style), args.check));
 
         let saved = state::load();
         let initial_username = saved

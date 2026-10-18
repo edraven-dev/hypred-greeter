@@ -75,7 +75,7 @@ pub fn load_css(path: &Path) -> Vec<String> {
             provider.load_from_string(DEFAULT_STYLE);
         }
     }
-    problems.extend(capped(errors.take().unwrap_or_default(), CSS_PROBLEM_LINES));
+    problems.extend(errors.take().unwrap_or_default());
 
     gtk::style_context_add_provider_for_display(
         &display,
@@ -125,6 +125,15 @@ fn css_problem(
 ) -> String {
     let file = file.map_or("style".into(), |file| file.to_string_lossy().into_owned());
     format!("{file}:{}:{}: {err}", line + 1, column + 1)
+}
+
+/// --check lists every CSS problem the banner counts past its first few.
+pub fn css_lines(problems: Vec<String>, check: bool) -> Vec<String> {
+    if check {
+        problems
+    } else {
+        capped(problems, CSS_PROBLEM_LINES)
+    }
 }
 
 fn capped(mut lines: Vec<String>, limit: usize) -> Vec<String> {
@@ -463,6 +472,17 @@ mod tests {
         assert_eq!(shown[..5], lines[..5]);
         assert_eq!(shown[5], "css: +2 more");
         assert_eq!(capped(lines[..5].to_vec(), 5), lines[..5]);
+    }
+
+    #[test]
+    fn the_check_lists_and_counts_every_css_problem() {
+        let lines: Vec<String> = (1..=7).map(|n| format!("style.css:{n}:1: bad")).collect();
+        assert_eq!(css_lines(lines.clone(), false), capped(lines.clone(), CSS_PROBLEM_LINES));
+        assert_eq!(css_lines(lines.clone(), true), lines);
+        let (report, code) = crate::cli::check_report(&css_lines(lines, true));
+        assert_eq!(report.len(), 8, "{report:?}");
+        assert_eq!(report[6], "check: style.css:7:1: bad");
+        assert_eq!((report[7].as_str(), code), ("check: 7 problems", 1));
     }
 
     fn gtk(dark: Option<bool>, theme: Option<&str>) -> config::Gtk {

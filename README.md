@@ -55,9 +55,10 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 `--check` loads all three as the greeter under greetd does — a layout that
 makes login impossible is swapped for the built-in one, where `--demo` keeps
 it — and builds the widgets, without a window, greetd or label commands. It
-prints every problem the banner would show to stderr and exits 1 if there is
-one, 0 if not. It needs a display: run it from your desktop session before
-logging out onto a new config, stylesheet, layout or package.
+prints every problem the banner would show to stderr, each CSS problem too
+where the banner counts those past the fifth, and exits 1 if there is one, 0
+if not. It needs a display: run it from your desktop session before logging
+out onto a new config, stylesheet, layout or package.
 
 ### config.toml
 
