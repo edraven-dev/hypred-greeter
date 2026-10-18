@@ -2886,6 +2886,83 @@ mod tests {
         assert_eq!(log[over..], ["locked false", "info ", parked], "{log:?}");
     }
 
+    /// Under 0 what a hold kept back opens at the next input after it,
+    /// not as it ends.
+    fn opens_at_the_next_input_after(
+        auth: &Rc<Auth>,
+        pump: &dyn Fn(),
+        seen: &Seen,
+        over: impl Fn() -> bool,
+    ) {
+        let opened = creates(seen);
+        assert!(pump_until(pump, over), "{:?}", requests(seen));
+        pump();
+        assert_eq!(creates(seen), opened, "opened as the hold ended: {:?}", requests(seen));
+        auth.backdate(RESTART_COOLDOWN);
+        auth.note_activity();
+        pump();
+        assert_eq!(creates(seen), opened + 1, "{:?}", requests(seen));
+    }
+
+    fn last_opened(seen: &Seen) -> Option<String> {
+        requests(seen).into_iter().filter(|r| r.starts_with("create")).last()
+    }
+
+    #[test]
+    fn under_0_what_a_cooldown_held_opens_at_the_next_input() {
+        for edit in [false, true] {
+            let (backend, seen, _) = scripted(three_no_matches);
+            let options = config::Auth { fingerprint_misses: 2, ..eager(0) };
+            drive_with(backend, options, |auth, pump| {
+                auth.set_cooldown(Duration::from_millis(300));
+                auth.start_eager("edraven");
+                assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+                assert!(auth.cooling());
+                if edit {
+                    show("bob");
+                    auth.start_eager("bob");
+                } else {
+                    auth.submit("fail".into());
+                }
+                pump();
+                opens_at_the_next_input_after(auth, pump, &seen, || !auth.cooling());
+            });
+            let expected = if edit { "create bob" } else { "create edraven" };
+            assert_eq!(last_opened(&seen).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn under_0_what_a_wait_out_held_opens_at_the_next_input() {
+        for edit in [false, true] {
+            let (backend, seen, _) = scripted(password_only);
+            drive_with(backend, eager(0), |auth, pump| {
+                // Failed logins of a user without prints: parks at once.
+                auth.set_wait_out(HOLD);
+                auth.start_eager("edraven");
+                pump();
+                for _ in 1..INSTANT_PARKS {
+                    auth.submit("fail".into());
+                    pump();
+                    auth.backdate(RESTART_COOLDOWN);
+                    auth.note_activity();
+                    pump();
+                }
+                assert!(auth.waiting_out.get(), "{:?}", requests(&seen));
+                if edit {
+                    show("bob");
+                    auth.start_eager("bob");
+                } else {
+                    auth.submit("fail".into());
+                }
+                pump();
+                opens_at_the_next_input_after(auth, pump, &seen, || !auth.waiting_out.get());
+            });
+            let expected = if edit { "create bob" } else { "create edraven" };
+            assert_eq!(last_opened(&seen).as_deref(), Some(expected));
+        }
+    }
+
     static ENDED_BEFORE_THE_END: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
