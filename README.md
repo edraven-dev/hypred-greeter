@@ -211,7 +211,10 @@ GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
 `@media (prefers-color-scheme: dark) { … }` (GTK 4.20 and later) follows
 `[gtk] dark`, or the desktop's colour scheme while `dark` is unset, so one
-stylesheet can carry a light and a dark look.
+stylesheet can carry a light and a dark look. `(prefers-contrast: more)`
+(4.20) and `(prefers-reduced-motion: reduce)` (4.22) follow GTK's settings
+of the same names (`gtk-interface-contrast`, `gtk-interface-reduced-motion`
+in the greeter user's settings.ini), as GTK's own theme does.
 Parse errors are skipped, never fatal: each is logged and shown in the banner
 as `style.css:3:6: …` (the first five; the rest are counted). So are GTK's
 warnings about a block that is never used (an undefined `@media` feature) or

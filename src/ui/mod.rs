@@ -16,6 +16,13 @@ use crate::ui::ctx::AppHandle;
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
 const COLOR_SCHEME: &str = "gtk-interface-color-scheme";
 const PREFERS_COLOR_SCHEME: &str = "prefers-color-scheme";
+/// GtkSettings' interface preferences (GTK 4.20; reduced motion 4.22) and
+/// the media features a stylesheet tests them by.
+const MEDIA_FEATURES: [(&str, &str); 3] = [
+    (COLOR_SCHEME, PREFERS_COLOR_SCHEME),
+    ("gtk-interface-contrast", "prefers-contrast"),
+    ("gtk-interface-reduced-motion", "prefers-reduced-motion"),
+];
 /// Past this many CSS problems the banner only counts the rest.
 const CSS_PROBLEM_LINES: usize = 5;
 /// `.hg-failed` stays at least this long: the next input re-arms the reader
@@ -44,7 +51,7 @@ pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
 pub fn load_css(path: &Path) -> Vec<String> {
     let display = gtk::gdk::Display::default().expect("no display");
     let provider = gtk::CssProvider::new();
-    follow_color_scheme(&gtk::Settings::for_display(&display), &provider);
+    follow_settings(&gtk::Settings::for_display(&display), &provider);
     // The callback runs inside load_from_path: the list is complete once
     // that returns. A re-parse after a scheme change only logs.
     let errors = Rc::new(RefCell::new(Some(Vec::new())));
@@ -86,15 +93,15 @@ pub fn load_css(path: &Path) -> Vec<String> {
     problems
 }
 
-/// GTK binds its colour scheme to the theme and to the user's gtk.css
-/// only; a provider of our own left unbound never matches
-/// `@media (prefers-color-scheme: dark)`. Bound before the load, so the
-/// sheet is parsed once.
-fn follow_color_scheme(settings: &gtk::Settings, provider: &gtk::CssProvider) {
-    if settings.find_property(COLOR_SCHEME).is_some()
-        && provider.find_property(PREFERS_COLOR_SCHEME).is_some()
-    {
-        settings.bind_property(COLOR_SCHEME, provider, PREFERS_COLOR_SCHEME).sync_create().build();
+/// GTK binds its settings to the media features of the theme and of the
+/// user's gtk.css only; a provider of our own left unbound never matches
+/// `@media (prefers-color-scheme: dark)` and the like. Bound before the
+/// load, so the sheet is parsed once.
+fn follow_settings(settings: &gtk::Settings, provider: &gtk::CssProvider) {
+    for (setting, feature) in MEDIA_FEATURES {
+        if settings.find_property(setting).is_some() && provider.find_property(feature).is_some() {
+            settings.bind_property(setting, provider, feature).sync_create().build();
+        }
     }
 }
 
@@ -515,10 +522,26 @@ mod tests {
                 Some(nick)
             );
         }
+    }
+
+    #[test]
+    fn each_media_feature_takes_its_setting_s_type() {
+        let settings = glib::Class::<gtk::Settings>::from_type(gtk::Settings::static_type());
         let provider = glib::Class::<gtk::CssProvider>::from_type(gtk::CssProvider::static_type());
-        let feature = provider.and_then(|class| class.find_property(PREFERS_COLOR_SCHEME));
-        let feature = feature.expect("a GTK with the setting has the media feature");
-        assert_eq!(feature.value_type(), pspec.value_type(), "a binding needs one type");
+        let (settings, provider) = (settings.unwrap(), provider.unwrap());
+        let mut bound = 0;
+        for (setting, feature) in MEDIA_FEATURES {
+            let Some(pspec) = settings.find_property(setting) else { continue };
+            let found = provider.find_property(feature).unwrap_or_else(|| panic!("{feature}"));
+            assert_eq!(found.value_type(), pspec.value_type(), "a binding needs one type");
+            bound += 1;
+        }
+        let expected = match (gtk::check_version(4, 20, 0), gtk::check_version(4, 22, 0)) {
+            (Some(_), _) => 0,
+            (None, Some(_)) => 2,
+            (None, None) => 3,
+        };
+        assert_eq!(bound, expected);
     }
 
     #[test]
