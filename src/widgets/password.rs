@@ -177,9 +177,10 @@ fn mask_step(
 /// With `mask-visible = false`: when the entry shows its text in clear.
 /// Only a visible prompt's answer does, what is typed into the empty entry
 /// while that prompt is pending: a password typed before it came (during a
-/// fingerprint wait) stays masked. PAM cannot send an error while a prompt
-/// waits, and one of the greeter's own (a failed command) leaves the
-/// prompt pending. What the peek icon shows is the user's and stays.
+/// fingerprint wait) stays masked. A username edit ends it, as what is
+/// typed next is the new user's password. PAM cannot send an error while a
+/// prompt waits, and one of the greeter's own (a failed command) leaves
+/// the prompt pending. What the peek icon shows is the user's and stays.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Mask {
     /// A visible prompt is pending.
@@ -200,7 +201,8 @@ impl Mask {
             UiEvent::Prompt { secret: true, .. }
             | UiEvent::Busy(true)
             | UiEvent::AuthError(_)
-            | UiEvent::Armed(true) => self.end(),
+            | UiEvent::Armed(true)
+            | UiEvent::UsernameChanged(_) => self.end(),
             UiEvent::Info(text) if text.is_empty() => self.end(),
             UiEvent::Info(_)
             | UiEvent::Busy(false)
@@ -208,8 +210,7 @@ impl Mask {
             | UiEvent::SessionChanged(_)
             | UiEvent::Armed(false)
             | UiEvent::Starting
-            | UiEvent::Focus(_)
-            | UiEvent::UsernameChanged(_) => None,
+            | UiEvent::Focus(_) => None,
         }
     }
 
@@ -332,6 +333,7 @@ mod tests {
             UiEvent::Info(String::new()),
             // A re-arm ends a parked prompt with no other event.
             UiEvent::Armed(true),
+            UiEvent::UsernameChanged("bob".into()),
         ];
         for passive in [false, true] {
             for end in &ends {
@@ -350,11 +352,13 @@ mod tests {
             UiEvent::Starting,
             UiEvent::Focus(FocusTarget::Password),
             UiEvent::SessionChanged(0),
-            UiEvent::UsernameChanged("mfa".into()),
         ] {
             let mut entry = Entry::default();
             assert!(entry.on(&visible(false)).holds("12").on(&event).shown, "{event:?}");
         }
+        let mut entry = Entry::default();
+        assert!(!entry.on(&UiEvent::UsernameChanged("mfa".into())).shown, "the startup announce");
+        assert!(entry.on(&visible(false)).shown);
     }
 
     #[test]
