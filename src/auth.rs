@@ -142,8 +142,9 @@ pub struct Auth {
     cooling: Cell<bool>,
     /// The cool-down text is the last thing shown, as far as auth can tell.
     cooling_shown: Cell<bool>,
-    /// Passive conversations in a row that parked without any info.
-    instant_parks: Cell<u32>,
+    /// Whose passive conversations parked without a fingerprint wait, and
+    /// how many in a row.
+    instant_parks: RefCell<(String, u32)>,
     wait_out: Cell<Duration>,
     waiting_out: Cell<bool>,
     hooks: Hooks,
@@ -196,7 +197,7 @@ impl Auth {
             misses: RefCell::default(),
             cooling: Cell::new(false),
             cooling_shown: Cell::new(false),
-            instant_parks: Cell::new(0),
+            instant_parks: RefCell::default(),
             wait_out: Cell::new(WAIT_OUT),
             waiting_out: Cell::new(false),
             hooks,
@@ -461,13 +462,7 @@ impl Auth {
         if !(self.hooks.seat_active)() {
             return self.wait_for_seat();
         }
-        let cycled = match &*self.phase.borrow() {
-            Phase::Conversing { saw_info, started, .. } => {
-                *saw_info && started.elapsed() >= REARM_SPIN_GUARD
-            }
-            _ => false,
-        };
-        if !cycled {
+        if !self.cycle_ran() {
             return self.schedule_retry(false);
         }
         self.quick_ends.set(0);
@@ -480,6 +475,18 @@ impl Auth {
         };
         if attentive {
             self.restart_unless_typing();
+        }
+    }
+
+    /// Something was said and the park came later than one at once does:
+    /// pam_fprintd waited for a finger. pam_faillock's lock notice or a
+    /// cycle cut short right away is no wait.
+    fn cycle_ran(&self) -> bool {
+        match &*self.phase.borrow() {
+            Phase::Conversing { saw_info, started, .. } => {
+                *saw_info && started.elapsed() >= REARM_SPIN_GUARD
+            }
+            _ => false,
         }
     }
 
@@ -695,7 +702,6 @@ impl Auth {
                 if let Phase::Conversing { saw_info, .. } = &mut *self.phase.borrow_mut() {
                     *saw_info = true;
                 }
-                self.instant_parks.set(0);
                 self.emit(UiEvent::Info(text));
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
@@ -712,21 +718,20 @@ impl Auth {
     }
 
     fn await_input(&self, secret: bool, text: String) {
-        let (passive, instant) = match &mut *self.phase.borrow_mut() {
-            Phase::Conversing { awaiting_input, passive, asked_secret, saw_info, .. } => {
+        let cycled = self.cycle_ran();
+        let (passive, user) = match &mut *self.phase.borrow_mut() {
+            Phase::Conversing { user, awaiting_input, passive, asked_secret, .. } => {
                 *awaiting_input = true;
                 *asked_secret = secret;
-                (*passive, !*saw_info)
+                (*passive, user.clone())
             }
-            _ => (false, false),
+            _ => (false, String::new()),
         };
         self.sync_armed();
         self.emit(UiEvent::Busy(false));
         self.emit(UiEvent::Prompt { secret, text, passive });
         if passive {
-            if instant {
-                self.note_instant_park();
-            }
+            self.note_park(user, cycled);
             self.remind_cooling();
             self.maybe_rearm();
         }
@@ -737,17 +742,26 @@ impl Auth {
     /// Claim fails at once until fprintd exits, 30 s after its last client —
     /// which every retry and every input-driven re-arm is. Such parks look
     /// like a reader claimed elsewhere or a user without prints; a few in a
-    /// row hold every passive open past that exit, once.
-    fn note_instant_park(&self) {
-        let parks = self.instant_parks.get() + 1;
-        if parks < INSTANT_PARKS {
-            return self.instant_parks.set(parks);
+    /// row for one user hold every passive open past that exit, once. Per
+    /// user: the names typed on the way to a username have no prints.
+    fn note_park(&self, user: String, cycled: bool) {
+        let mut run = self.instant_parks.borrow_mut();
+        if cycled || run.0 != user {
+            *run = (user, 0);
         }
-        self.instant_parks.set(0);
+        if cycled {
+            return;
+        }
+        run.1 += 1;
+        if run.1 < INSTANT_PARKS {
+            return;
+        }
+        let parks = std::mem::take(&mut run.1);
+        drop(run);
         self.waiting_out.set(true);
         let wait = self.wait_out.get();
         info!(
-            "{parks} conversations in a row asked for the password at once: \
+            "{parks} conversations in a row reached a prompt without a fingerprint wait: \
              opening none for {} s, so a stuck fprintd can exit",
             wait.as_secs()
         );
@@ -2027,10 +2041,12 @@ mod tests {
             auth.set_retry(FAST, FAST);
             auth.set_wait_out(HOLD);
             auth.start_eager("edraven");
+            // The lid closed a while into the scan.
+            auth.backdate(Duration::from_secs(2));
             // The cut-short cycle, then three parks at once.
             assert!(pump_until(pump, || creates(&seen) == 4), "{:?}", requests(&seen));
             nothing_opens_for(pump, &seen, HOLD / 2);
-            assert_eq!(auth.instant_parks.get(), 0, "the next hold takes three more");
+            assert_eq!(auth.instant_parks.borrow().1, 0, "the next hold takes three more");
             assert!(pump_until(pump, || creates(&seen) == 7), "{:?}", requests(&seen));
             nothing_opens_for(pump, &seen, HOLD / 2);
         });
@@ -2099,20 +2115,24 @@ mod tests {
         assert!(!log.iter().any(|e| e.starts_with("locked") || e == LOCKED), "{log:?}");
     }
 
-    static RUN_BROKEN_BY_INFO: AtomicUsize = AtomicUsize::new(0);
+    static RUN_BROKEN_BY_A_SCAN: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
-    fn fingerprint_info_ends_a_run_of_instant_parks_and_input_does_not() {
-        RUN_BROKEN_BY_INFO.store(0, Ordering::SeqCst);
-        let (backend, seen, _) =
-            scripted(|user| match RUN_BROKEN_BY_INFO.fetch_add(1, Ordering::SeqCst) {
-                2 => fprint_cut_short(user),
+    fn a_fingerprint_wait_ends_a_run_of_instant_parks_and_input_does_not() {
+        RUN_BROKEN_BY_A_SCAN.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) =
+            scripted(|user| match RUN_BROKEN_BY_A_SCAN.fetch_add(1, Ordering::SeqCst) {
+                2 => fprint_gated(user),
                 _ => password_only(user),
             });
         drive_with(backend, eager_always(), |auth, pump| {
             auth.set_retry(FAST, FAST);
             auth.set_wait_out(Duration::from_secs(60));
             auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            pump();
+            auth.backdate(Duration::from_secs(2));
+            gate.release();
             assert!(pump_until(pump, || creates(&seen) == 6), "{:?}", requests(&seen));
             nothing_opens_for(pump, &seen, Duration::from_millis(100));
         });
@@ -2130,6 +2150,50 @@ mod tests {
                 gate.release();
             }
             nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+    }
+
+    #[test]
+    fn names_typed_on_the_way_to_a_username_start_no_wait_out() {
+        let (backend, seen, _) = scripted(|user| match user {
+            "edraven" => fprint(user),
+            _ => password_only(user),
+        });
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(Duration::from_secs(60), Duration::from_secs(60));
+            for typed in ["e", "ed", "edr", "edra", "edraven"] {
+                show(typed);
+                auth.start_eager(typed);
+                pump();
+            }
+            assert!(!auth.waiting_out.get());
+        });
+        let partials = ["create e", "cancel", "create ed", "cancel", "create edr", "cancel"];
+        let expected = [&partials[..], &["create edra", "cancel", "create edraven"]].concat();
+        assert_eq!(requests(&seen)[..expected.len()], expected);
+    }
+
+    /// pam_fprintd fails at once (a wedged reader), pam_faillock's preauth
+    /// tells of a locked account (two PAM_TEXT_INFO, pam_faillock 1.7.3),
+    /// pam_unix asks.
+    fn faillock_notice(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "The account is locked due to 3 failed logins."),
+            Step::Msg(Info, "(10 minutes left to unlock)"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn a_lock_notice_before_the_prompt_still_counts_as_a_park_at_once() {
+        let (backend, seen, _) = scripted(faillock_notice);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(Duration::from_secs(60));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+            assert!(auth.waiting_out.get());
         });
     }
 
@@ -2675,6 +2739,7 @@ mod tests {
             let (backend, seen, _) = scripted(three_no_matches);
             let log = drive_with(backend, options, |auth, pump| {
                 auth.set_retry(FAST, FAST * 2);
+                auth.set_wait_out(FAST);
                 auth.start_eager("edraven");
                 assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
             });

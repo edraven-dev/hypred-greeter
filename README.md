@@ -374,16 +374,24 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   because the reader was claimed elsewhere or not up yet — is reopened by
   timer, so a touch works again without any input: after 3 s, doubling up
   to 60 s, three tries; under `"always"` without a limit, and a busy reader
-  is retried every 6 s at most. None of these timers run with `0`. Three
-  parks in a row before pam_fprintd said anything — the reader claimed
-  elsewhere, a user without prints, or an fprintd that can no longer claim
+  is retried every 6 s at most. None of these timers run with `0`.
+- **A reader that never gets to wait is waited out.** Three passive
+  conversations in a row for one name that reach a prompt without a
+  fingerprint wait (nothing said first, or the prompt within a second of
+  opening: pam_faillock's lock notice is no wait) hold every re-arm for
+  31 s: no timer, input, username edit or return to the VT opens a
+  conversation meanwhile. The reader claimed elsewhere and a user without
+  prints look like that, and so does an fprintd that can no longer claim
   the reader after the lid was closed mid-scan (fprintd 1.94.5 with
   libfprint 1.94.100 leaves the device open when it is released while
-  suspended, and every claim fails until the daemon exits) — make the
-  greeter open nothing on its own for 31 s: fprintd exits 30 s after its
-  last client, every retry and re-arm is one, and the next daemon starts
-  clean. A parked prompt still takes a password meanwhile; then the
-  retries go on as above, and the next three such parks pause them again.
+  suspended, and every claim fails until the daemon exits): fprintd exits
+  30 s after its last client, every re-arm is one, and the next daemon
+  starts clean. A parked prompt still takes a password, nothing is refused
+  and nothing is shown (the log says it); then the retries go on as above,
+  and the next three such parks hold them again. A run is one name's, so
+  the names typed on the way to a username do not add up; but a remembered
+  user without prints keeps an `"always"` greeter in this hold most of the
+  time, and a name typed during it gets the reader only when it ends.
 - **Failed scans are capped.** pam_fprintd gives a conversation `max-tries`
   scans (3) and then hands over to the password, but every re-arm is a
   fresh conversation and `pam_faillock` never sees a scan (pam_fprintd is
@@ -453,7 +461,8 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   prompt (an OTP mid-way, whose text is then cleared); on a parked prompt
   it is just input (see above). **Enter on an empty entry** submits
   nothing. After a failed login the reader re-arms on your next input or
-  (unless `rearm-window = 0`) after 3 s, so the error stays readable. An answer typed for a
+  (unless `rearm-window = 0`) after 3 s, so the error stays readable (in a
+  wait-out or a cool-down: once it is over, above). An answer typed for a
   second-stage prompt is never reused as a password if the username
   changed meanwhile.
 
@@ -462,9 +471,9 @@ config and `USER=touch` (a login with nothing pressed) or `USER=fprint`
 (a timed-out cycle; add `rearm-window = "always"` to watch it re-arm), or
 `USER=miss` (three misses per conversation: under `"always"` the third
 conversation starts the cool-down and `.hg-fingerprint-locked`;
-`fingerprint-misses = 3` makes it the first). Any other name parks at once:
-the third park in a row starts the 31 s wait, which the log on stderr
-shows.
+`fingerprint-misses = 3` makes it the first). Under `"always"` any other
+name parks at once and is retried: the third park in a row starts the 31 s
+wait-out, which the log on stderr shows.
 
 ## Development
 
