@@ -2201,6 +2201,26 @@ mod tests {
         });
     }
 
+    #[test]
+    fn the_wait_out_holds_input_and_username_edits_under_a_window_too() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager(10), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.waiting_out.get()), "{:?}", requests(&seen));
+            assert_eq!(creates(&seen), 3);
+            auth.backdate(RESTART_COOLDOWN);
+            auth.note_activity();
+            nothing_opens_for(pump, &seen, HOLD / 4);
+            show("bob");
+            auth.start_eager("bob");
+            nothing_opens_for(pump, &seen, HOLD / 4);
+            assert!(pump_until(pump, || creates(&seen) > 3), "{:?}", requests(&seen));
+        });
+        assert_eq!(requests(&seen)[5..7], ["cancel", "create bob"]);
+    }
+
     static CRASHES: AtomicUsize = AtomicUsize::new(0);
 
     /// fprintd vanishes mid-verify; the D-Bus activation behind pam_fprintd's
@@ -2620,6 +2640,30 @@ mod tests {
     }
 
     #[test]
+    fn misses_in_a_password_conversation_count_too() {
+        fn misses_then_asks(_: &str) -> Vec<Step> {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ]
+        }
+        let (backend, seen, _) = scripted(misses_then_asks);
+        let classic = config::Auth { fingerprint_misses: 2, ..Default::default() };
+        let log = drive_with(backend, classic, |auth, pump| {
+            auth.begin("edraven".into(), "pw".into());
+            pump();
+        });
+        let misses = positions(&log, MISS_SHOWN);
+        assert_eq!(positions(&log, "locked true"), [misses[1] + 1], "{log:?}");
+        let requests = requests(&seen);
+        assert_eq!(requests[requests.len() - 2..], ["respond Some(\"pw\")", "start true"]);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
     fn a_park_in_a_cooldown_shows_its_text_again() {
         let (backend, _, _) = scripted(three_no_matches);
         let log = drive_with(backend, capped(3), |auth, pump| {
@@ -2631,6 +2675,21 @@ mod tests {
         let expected: Vec<String> =
             [&at_cap[..], &parked].concat().into_iter().map(String::from).collect();
         assert!(log.ends_with(&expected), "{log:?}");
+    }
+
+    #[test]
+    fn the_cooldown_lasts_fingerprint_cooldown() {
+        let cooldown = Duration::from_millis(400);
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_cooldown(cooldown);
+            let since = Instant::now();
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            assert!(since.elapsed() >= cooldown, "re-armed after {:?}", since.elapsed());
+        });
+        assert_eq!(count(&log, "locked false"), 1, "{log:?}");
     }
 
     #[test]
