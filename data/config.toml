@@ -8,8 +8,9 @@ layout = "layout.toml"     # widget tree; missing file → built-in layout
 style = "style.css"        # GTK4 CSS; missing file → built-in style
 
 [background]
-# Default image for `background` widgets (they can override per-widget).
-# image = "/usr/share/hypred-greeter/background.png"
+# Default image for `background` widgets (they can override per-widget):
+# any image file, a relative path from this directory; unset, none.
+# image = "wallpaper.jpg"
 fit = "cover"              # cover | contain | fill | scale-down
 
 [gtk]
@@ -82,8 +83,8 @@ poweroff = ["systemctl", "poweroff"]
 x11-prefix = ["startx", "/usr/bin/env"]
 # Extra KEY=value pairs handed to greetd's start_session.
 # env = ["XCURSOR_SIZE=24"]
-# Preselected for a user with no session remembered yet (else the first by
-# name): "<wayland|x11>/<desktop file stem>".
+# Preselected for a user with no session remembered yet (else the first in
+# the list, after only/hide/names/order): "<wayland|x11>/<desktop file stem>".
 # default = "wayland/hyprland-uwsm"
 # Same ids: `only` keeps just these, `hide` drops these, `order` lists
 # these first (the rest follow by name). An id that matches nothing is
