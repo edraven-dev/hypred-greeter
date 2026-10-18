@@ -13,6 +13,7 @@ use crate::config;
 use crate::ui::bus::{Bus, UiEvent};
 
 pub const DEFAULT_STYLE: &str = include_str!("../../data/style.css");
+const COLOR_SCHEME: &str = "gtk-interface-color-scheme";
 /// Past this many CSS problems the banner only counts the rest.
 const CSS_PROBLEM_LINES: usize = 5;
 /// `.hg-failed` stays at least this long: the next input re-arms the reader
@@ -363,16 +364,20 @@ fn theme_change(cfg: &config::Gtk) -> Theme<'_> {
 /// alias of it that warns on every write; before, the theme variant came
 /// from prefer-dark alone, so an older GTK gets that too.
 fn set_color_scheme(settings: &gtk::Settings, dark: bool) {
-    let scheme = settings
-        .find_property("gtk-interface-color-scheme")
-        .and_then(|pspec| glib::EnumClass::with_type(pspec.value_type()))
-        .and_then(|class| class.to_value_by_nick(if dark { "dark" } else { "light" }));
+    let scheme = settings.find_property(COLOR_SCHEME).and_then(|pspec| scheme_value(&pspec, dark));
     if let Some(scheme) = &scheme {
-        settings.set_property_from_value("gtk-interface-color-scheme", scheme);
+        settings.set_property_from_value(COLOR_SCHEME, scheme);
     }
     if scheme.is_none() || gtk::check_version(4, 23, 0).is_some() {
         settings.set_gtk_application_prefer_dark_theme(dark);
     }
+}
+
+/// By nick, from the enum behind `pspec`: the binding has no
+/// GtkInterfaceColorScheme either.
+fn scheme_value(pspec: &glib::ParamSpec, dark: bool) -> Option<glib::Value> {
+    let class = glib::EnumClass::with_type(pspec.value_type())?;
+    class.to_value_by_nick(if dark { "dark" } else { "light" })
 }
 
 #[cfg(test)]
@@ -431,6 +436,22 @@ mod tests {
         assert_eq!(dark_scheme(&gtk(Some(false), Some("Default"))), Some(false));
         assert_eq!(dark_scheme(&gtk(Some(true), None)), Some(true));
         assert_eq!(dark_scheme(&gtk(None, Some("adw-gtk3"))), None);
+    }
+
+    #[test]
+    fn the_colour_scheme_is_found_by_name_and_nick() {
+        let settings = glib::Class::<gtk::Settings>::from_type(gtk::Settings::static_type());
+        let Some(pspec) = settings.and_then(|class| class.find_property(COLOR_SCHEME)) else {
+            assert!(gtk::check_version(4, 20, 0).is_some(), "GTK 4.20 has {COLOR_SCHEME}");
+            return;
+        };
+        for (dark, nick) in [(true, "dark"), (false, "light")] {
+            let value = scheme_value(&pspec, dark).expect(nick);
+            assert_eq!(
+                glib::EnumValue::from_value(&value).map(|(_, found)| found.nick()),
+                Some(nick)
+            );
+        }
     }
 
     #[test]
