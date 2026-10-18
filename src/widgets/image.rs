@@ -30,14 +30,27 @@ const JPEG_MAX_SCANS: usize = 100;
 
 /// A theme icon by name, or an image file by absolute path.
 pub fn load_icon(value: &str) -> Result<gtk::Image, WidgetError> {
-    if value.starts_with('/') {
-        return Ok(gtk::Image::from_paintable(Some(&paintable(Path::new(value), ICON_SIZE)?)));
-    }
-    let display = gdk::Display::default();
-    if display.is_some_and(|display| !gtk::IconTheme::for_display(&display).has_icon(value)) {
-        return Err(WidgetError::Other(format!("icon `{value}` is not in the icon theme")));
-    }
-    Ok(gtk::Image::from_icon_name(value))
+    let image = if value.starts_with('/') {
+        gtk::Image::from_paintable(Some(&paintable(Path::new(value), ICON_SIZE)?))
+    } else {
+        let display = gdk::Display::default();
+        if display.is_some_and(|display| !gtk::IconTheme::for_display(&display).has_icon(value)) {
+            return Err(WidgetError::Other(format!("icon `{value}` is not in the icon theme")));
+        }
+        gtk::Image::from_icon_name(value)
+    };
+    Ok(clipped(image))
+}
+
+/// GTK CSS has no `overflow`: clipped, a stylesheet's `border-radius`
+/// rounds the picture and `-gtk-icon-transform: scale()` crops it to its
+/// box. Centred, so that box is the picture's square rather than whatever
+/// a parent stretches it to (a layout's `halign`/`valign` still win).
+fn clipped(image: gtk::Image) -> gtk::Image {
+    image.set_overflow(gtk::Overflow::Hidden);
+    image.set_halign(gtk::Align::Center);
+    image.set_valign(gtk::Align::Center);
+    image
 }
 
 /// An SVG is rendered at `size` by GTK's icon renderer (gdk-pixbuf no
@@ -199,11 +212,12 @@ impl WidgetDef for ImageDef {
         let image = match sources {
             (Some(file), None, None) => {
                 let path = ctx.resolve_path(Path::new(&file));
-                gtk::Image::from_paintable(Some(&paintable(&path, size.unwrap_or(ICON_SIZE))?))
+                let paintable = paintable(&path, size.unwrap_or(ICON_SIZE))?;
+                clipped(gtk::Image::from_paintable(Some(&paintable)))
             }
             (None, Some(icon), None) => load_icon(&icon)?,
             (None, None, Some(source)) if source == "avatar" => {
-                let image = gtk::Image::new();
+                let image = clipped(gtk::Image::new());
                 let shown = RefCell::new(ctx.app.username());
                 image.set_paintable(avatar(&shown.borrow()).as_ref());
                 let weak = image.downgrade();
