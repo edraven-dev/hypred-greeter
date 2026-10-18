@@ -1,6 +1,8 @@
 //! Exit codes: 0 session started, 1 startup failure, 2 greetd transport
-//! failure, 101 panic. greetd starts the chosen session only after this
-//! process exits, so it must always exit.
+//! failure, 101 panic; with --check 0 nothing to report, 1 problems or no
+//! check at all.
+//! greetd starts the chosen session only after this process exits, so it
+//! must always exit.
 
 mod auth;
 mod backend;
@@ -32,8 +34,8 @@ fn main() {
 
     let args = cli::parse();
 
-    if !args.demo && std::env::var_os("GREETD_SOCK").is_none() {
-        log::error!("GREETD_SOCK is not set and --demo not given; run under greetd or pass --demo");
+    if args.greetd() && std::env::var_os("GREETD_SOCK").is_none() {
+        log::error!("GREETD_SOCK is not set; run under greetd, or pass --demo or --check");
         std::process::exit(1);
     }
 
@@ -55,9 +57,10 @@ fn main() {
         ui::apply_gtk_settings(&loaded.config.gtk);
         let style = loaded.resolve(args.style.as_deref(), &loaded.config.paths.style);
         let mut problems = loaded.problems.clone();
-        problems.extend(ui::load_css(&style));
+        let css = ui::load_css(&style, &loaded.config.gtk);
+        problems.extend(ui::css_lines(css, args.check));
 
-        let saved = state::load();
+        let saved = if args.reads_state() { state::load() } else { state::State::default() };
         let initial_username = saved
             .last_user
             .clone()
@@ -72,9 +75,7 @@ fn main() {
         }
         problems.extend(layout.problems);
 
-        let backend: Box<dyn backend::Backend> = if args.demo {
-            Box::new(backend::DemoBackend::new())
-        } else {
+        let backend: Box<dyn backend::Backend> = if args.greetd() {
             match backend::GreetdBackend::connect() {
                 Ok(backend) => Box::new(backend),
                 Err(err) => {
@@ -82,6 +83,8 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        } else {
+            Box::new(backend::DemoBackend::new())
         };
 
         let discovered = sessions::discover();
@@ -108,7 +111,7 @@ fn main() {
         let current = shared.clone();
         let resolver = shared.clone();
         let resolver_config = loaded.clone();
-        let demo = args.demo;
+        let (demo, persist) = (args.demo, args.greetd());
         let auth = auth::Auth::start(
             backend,
             bus.clone(),
@@ -124,7 +127,7 @@ fn main() {
                         if let Some(session) = resolver.selected() {
                             state.last_session.insert(username.to_string(), session.cache_id());
                         }
-                        if !demo {
+                        if persist {
                             state::save(&state);
                         }
                     }
@@ -157,10 +160,20 @@ fn main() {
             &registry,
             handle.clone(),
             args.demo,
+            args.check,
         );
         let root = layout::build::build_node(&ctx, &layout.root);
         problems.extend(ctx.take_problems());
         let focus_placed = layout::requests_focus(&layout.root);
+
+        // Every problem source comes before this: --check ends here.
+        if args.check {
+            let (lines, code) = cli::check_report(&problems);
+            for line in lines {
+                eprintln!("[hypred-greeter] {line}");
+            }
+            std::process::exit(code);
+        }
 
         let window =
             gtk::ApplicationWindow::builder().application(app).title("hypred-greeter").build();
@@ -173,7 +186,7 @@ fn main() {
             window.add_css_class("hg-problems");
         }
         window.set_child(Some(&ui::window_content(&problems, root)));
-        ui::track_states(&window, &handle.bus);
+        ui::track_states(&window, &handle);
         handle.emit(&UiEvent::UsernameChanged(handle.username()));
         if args.demo {
             // No title bar: the published viewport is the surface's size,

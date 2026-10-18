@@ -45,11 +45,25 @@ chosen session only after the greeter command exits).
 Everything lives in `/etc/greetd/hypred-greeter/` (override with
 `--config`): `config.toml`, `layout.toml`, `style.css`. All three ship
 documented defaults. Relative paths in `[paths]` resolve against the config
-directory; `--layout` and `--style` override for quick iteration:
+directory; `--layout` and `--style` override them for quick iteration, a
+relative one from the current directory:
 
 ```sh
 hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 ```
+
+`--check` loads all three as the greeter under greetd does on its first
+start — a layout that makes login impossible is swapped for the built-in
+one, where `--demo` keeps it — and builds the widgets, without a window,
+greetd or label commands. It prints every problem the banner would show to
+stderr, each CSS problem too where the banner counts those past the fifth,
+and exits 1 if there is one, 0 if not. It needs a display: run it from your
+desktop session before logging out onto a new config, stylesheet, layout or
+package. Two things differ from the login screen: the state file is left
+alone (only root and the greeter user may read it), so no user is
+remembered and a layout without a `username` widget passes only with
+`[auth] user`; and sessions are looked up in your `XDG_DATA_DIRS`, not the
+greeter user's.
 
 ### config.toml
 
@@ -57,7 +71,7 @@ hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 |---|---|---|
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
-| `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (`dark` is then off: GTK has no Empty-dark) | unset (GTK defaults) |
+| `[gtk]` | `dark` (GTK's colour scheme, dark or light: the theme's variant — its `gtk-dark.css` or its media queries — and, from GTK 4.20, what `@media (prefers-color-scheme: dark)` in the stylesheet matches), `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (GTK's scheme is then light, whatever `dark` or the desktop prefers: GTK has no Empty-dark and would load its Default theme in its place; the stylesheet's `@media (prefers-color-scheme: dark)` still matches with `dark = true`) | unset (GTK defaults) |
 | `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `30`, `400` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
@@ -103,11 +117,11 @@ widget = "background"
 [[root.children]]
 widget = "clock"
 format = "%A %e %B  %H:%M"
-anchor = "top"                # its offset: .hg-clock { margin-top: 48px } in style.css
+anchor = "top"                # its offset: .hg-clock { margin-top: 48px; } in style.css
 
 [[root.children]]
 widget = "box"
-name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px }
+name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px; }
 orientation = "vertical"
 anchor = "center"
 
@@ -137,8 +151,8 @@ them (the built-in layout sets none).
 offsets. A stylesheet kept from 0.2 next to the new layout.toml gets none of
 them; a layout.toml copied from 0.2 next to the new style.css gets them
 twice. Add to a custom stylesheet what the default one now has — `#card {
-border-spacing: 12px }`, `.hg-clock { margin-top: 48px }`, `.hg-power {
-margin: 0 24px 24px 0; border-spacing: 8px }` — and drop `spacing`/`margin`
+border-spacing: 12px; }`, `.hg-clock { margin-top: 48px; }`, `.hg-power {
+margin: 0 24px 24px 0; border-spacing: 8px; }` — and drop `spacing`/`margin`
 from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 
 **Widgets:**
@@ -155,7 +169,7 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 | `clock` | `format` (strftime), text properties | ticks every second |
 | `username` | `placeholder`, `xalign` | prefilled with the last user (else `[auth] user`); Enter moves on to the password |
 | `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
-| `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
+| `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays; else it goes after this long, and the window's `.hg-failed` with it), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
 | `session` | `style` (`dropdown`, `buttons`, `cycle`), for `buttons`: `orientation`, `spacing` | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
 | `power` | `reboot-label`, `poweroff-label`, `orientation`, `spacing` (0) | sugar: a box of two `button`s named `#hg-power-reboot` / `#hg-power-poweroff` with `action = "reboot"` / `"poweroff"` — build the same by hand for a third one |
 
@@ -195,8 +209,23 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 
 GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
+`@media (prefers-color-scheme: dark) { … }` (GTK 4.20 and later) follows
+`[gtk] dark` — or, while `dark` is unset and the theme is not Empty, the
+desktop's colour scheme — so one stylesheet can carry a light and a dark
+look. With `dark` unset, GTK 4.20–4.22 still take the theme's variant from
+the older `gtk-application-prefer-dark-theme` instead, so there the theme
+and the stylesheet can disagree; set `dark` to keep them in step.
+`(prefers-contrast: more)` (4.20) and `(prefers-reduced-motion: reduce)`
+(4.22) follow GTK's settings of the same names (`gtk-interface-contrast`,
+`gtk-interface-reduced-motion` in the greeter user's settings.ini), as
+GTK's own theme does.
 Parse errors are skipped, never fatal: each is logged and shown in the banner
-as `style.css:3:6: …` (the first five; the rest are counted).
+as `style.css:3:6: …` (the first five; the rest are counted). So are GTK's
+warnings about a block that is never used (an undefined `@media` feature) or
+a file that ends inside a block (a missing `}`). Warnings about what still
+works are only logged: deprecations (`@define-color`, `alpha()`; GTK reports
+them only with `GTK_DEBUG=css`), a block's last declaration without its `;`,
+an empty declaration (`;;`).
 
 **Sizes relative to the screen.** GTK CSS has no `%`/`vw` units for sizes,
 so the greeter publishes the window's size as custom properties on
@@ -226,10 +255,10 @@ message label:
 | class | while |
 |---|---|
 | `.hg-busy` | a submitted password is on its way |
-| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm or submission; a failure while it is on drops it for a frame, so an `animation:` on it restarts on every failure |
+| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
 | `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
-| `.hg-starting` | the session is being started (stays until the greeter exits) |
+| `.hg-starting` | the session is being started: under greetd until the greeter exits, a round trip later (too soon for a transition to show); in `--demo`, where nothing starts, until the next attempt (a submission, re-arm or prompt), so a theme can preview it; a failed start drops it |
 | `.hg-caps-lock` | Caps Lock is on |
 | `.hg-demo` | running with `--demo` |
 | `.hg-problems` | the banner is shown |
@@ -314,7 +343,9 @@ possible later without breaking existing widgets.
   a `password` widget.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
-  transport failure, `101` panic.
+  transport failure, `101` panic; with `--check`, `0` nothing to report and
+  `1` problems, or no check at all (no display, a bad argument: stderr says
+  which).
 
 ## Fingerprint (pam_fprintd)
 

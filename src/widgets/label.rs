@@ -298,7 +298,7 @@ impl WidgetDef for LabelDef {
             | UiEvent::Starting
             | UiEvent::Focus(_) => {}
         });
-        if let Some(argv) = command {
+        if let Some(argv) = command.filter(|_| !ctx.check) {
             let outputs = run_command(argv, interval as u64);
             glib::spawn_future_local(async move {
                 while let Ok(output) = outputs.recv().await {

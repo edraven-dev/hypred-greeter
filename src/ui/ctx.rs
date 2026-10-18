@@ -16,6 +16,7 @@ pub struct Shared {
     pub selected_session: Cell<usize>,
     pub state: RefCell<crate::state::State>,
     default_session: Option<usize>,
+    clear_failed: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl Shared {
@@ -33,6 +34,7 @@ impl Shared {
             selected_session: Cell::new(0),
             state: RefCell::new(state),
             default_session,
+            clear_failed: RefCell::default(),
         };
         shared.selected_session.set(shared.preselected_session().unwrap_or(0));
         Rc::new(shared)
@@ -137,6 +139,19 @@ impl AppHandle {
     pub fn emit(&self, event: &UiEvent) {
         self.auth.emit(event.clone());
     }
+
+    /// Ends the window's `.hg-failed` alone. An empty info would end it
+    /// too, but every widget takes that for a dropped conversation.
+    pub fn clear_failed(&self) {
+        let hook = self.shared.clear_failed.borrow().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub fn connect_clear_failed(&self, hook: impl Fn() + 'static) {
+        *self.shared.clear_failed.borrow_mut() = Some(Rc::new(hook));
+    }
 }
 
 pub struct BuildCtx<'a> {
@@ -146,6 +161,8 @@ pub struct BuildCtx<'a> {
     pub bus: Rc<Bus>,
     pub app: AppHandle,
     pub demo: bool,
+    /// Built for --check, never shown: nothing is run.
+    pub check: bool,
     problems: RefCell<Vec<String>>,
 }
 
@@ -156,9 +173,11 @@ impl<'a> BuildCtx<'a> {
         registry: &'a Registry,
         app: AppHandle,
         demo: bool,
+        check: bool,
     ) -> Self {
         let bus = app.bus.clone();
-        Self { config, base_dir, registry, bus, app, demo, problems: RefCell::new(Vec::new()) }
+        let problems = RefCell::new(Vec::new());
+        Self { config, base_dir, registry, bus, app, demo, check, problems }
     }
 
     pub fn resolve_path(&self, path: &std::path::Path) -> std::path::PathBuf {
@@ -280,5 +299,20 @@ mod tests {
             app.set_username("bob");
         });
         assert_eq!(log, ["username bo", "username bob", "session 1"]);
+    }
+
+    #[test]
+    fn clearing_the_failed_state_tells_no_widget() {
+        let shared = Shared::new(String::new(), sessions(), State::default(), None);
+        let cleared = Rc::new(Cell::new(0));
+        let count = cleared.clone();
+        let log = events(shared, move |app| {
+            app.clear_failed();
+            app.connect_clear_failed(move || count.set(count.get() + 1));
+            app.clear_failed();
+            app.clone().clear_failed();
+        });
+        assert!(log.is_empty(), "{log:?}");
+        assert_eq!(cleared.get(), 2);
     }
 }
