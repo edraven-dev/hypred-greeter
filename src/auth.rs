@@ -732,7 +732,11 @@ impl Auth {
         self.emit(UiEvent::Prompt { secret, text, passive });
         if passive {
             self.note_park(user, cycled);
-            self.remind_cooling();
+            // Whatever cooling_shown says: a message widget may show the
+            // prompt over it.
+            if self.cooling.get() {
+                self.say_cooling();
+            }
             self.maybe_rearm();
         }
     }
@@ -2613,6 +2617,20 @@ mod tests {
         assert_eq!(blank, 1, "{:?}", requests(&seen));
         let refused = [String::from("busy false"), LOCKED.into()];
         assert!(log.ends_with(&refused), "{log:?}");
+    }
+
+    #[test]
+    fn a_park_in_a_cooldown_shows_its_text_again() {
+        let (backend, _, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(3), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        let at_cap = [MISS_SHOWN, "locked true", "armed false", LOCKED];
+        let parked = ["busy false", "prompt[true,passive] Password:", LOCKED];
+        let expected: Vec<String> =
+            [&at_cap[..], &parked].concat().into_iter().map(String::from).collect();
+        assert!(log.ends_with(&expected), "{log:?}");
     }
 
     #[test]
