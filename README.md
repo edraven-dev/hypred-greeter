@@ -403,21 +403,33 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   error occurred" or a timeout is no miss. `fingerprint-misses` (9: three
   conversations' worth) within `fingerprint-cooldown` seconds (600) start a
   cool-down that long: the window gets `.hg-fingerprint-locked`, the
-  message says `[texts] fingerprint-locked`, nothing opens a conversation
-  on its own — no timer, input, username edit or return to the VT arms the
-  reader — and a login completed without a password prompt answered (a
-  match in a conversation still running) is refused. The password still
-  works: a prompt already parked takes it at once. Otherwise PAM's order
-  holds: a submitted password still runs pam_fprintd first, which arms the
-  reader up to its `timeout=` before the password is asked for; during the
-  cool-down a touch there is refused, and the password goes into one new
-  conversation (pam_fprintd's wait included). When that one is refused as
-  well (touched again), or no scan came before the refused login (a stack
-  that lets the user in without asking, like a blank password under
-  `nullok`: no way in during a cool-down), the password is dropped — type
-  it again. A miss is forgotten `fingerprint-cooldown` seconds after it
-  came, misses during a cool-down are not counted, and when one ends the
-  reader re-arms as `rearm-window` says.
+  message says `[texts] fingerprint-locked` (again after a park or a
+  username edit in it; `error-clear-ms` clears it like any error), nothing
+  opens a conversation on its own — no timer, input, username edit or
+  return to the VT arms the reader — and a login completed without a
+  password prompt answered is refused. A scan already under way runs to its
+  end (greetd passes nothing on while pam_fprintd waits), so "Place your
+  finger" can still show; a match there is refused too. A miss is forgotten
+  `fingerprint-cooldown` seconds after it came and misses during a
+  cool-down are not counted, so every cool-down ends with none. The count
+  belongs to the greeter process and every name typed into it: a new
+  greeter (after a logout or a reboot) or the one on another VT starts from
+  none. When a cool-down ends, what it held goes on as `rearm-window` has
+  it: a parked prompt re-arms under `"always"`, under `N` if there was
+  input in the last N s (else at the next input), not under `0`; anything
+  else held — a username edit, a failed or refused login — opens at once
+  (at the next input under `0`).
+- **A cool-down leaves the password working.** A prompt already parked
+  takes it at once. Otherwise PAM's order holds: a submitted password still
+  runs pam_fprintd first, which arms the reader up to its `timeout=` before
+  the password is asked for; a touch there is refused, and the password
+  goes into one new conversation (pam_fprintd's wait included). When that
+  one is refused as well (touched again), or no scan came before the
+  refused login (a stack that lets the user in without asking, like a blank
+  password under `nullok`: no way in during a cool-down), the password is
+  dropped — type it again. So the cap bounds the greeter's own re-arming,
+  not someone at the keyboard: every password submission runs
+  pam_fprintd's scans, cool-down or not.
 - **Eager mode cancels PAM prompts — carry the right stack before enabling
   it.** Every restart, username change and Escape on a half-answered
   prompt drops a conversation that may sit at the password prompt. pam_unix

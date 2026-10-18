@@ -45,11 +45,12 @@ typing-hold = 30
 # opens for the name typed.
 username-debounce-ms = 400
 # Fingerprint scans that fail to match (pam_fprintd's "Failed to match
-# fingerprint") within fingerprint-cooldown seconds before a cool-down that
-# long: the greeter stops arming the reader on its own and refuses a login
-# without a password; a password still logs in. pam_fprintd's max-tries
-# holds per conversation only, every re-arm opens a fresh one, and faillock
-# never sees a scan. 9 = three conversations of max-tries 3; 0 = no cap.
+# fingerprint") within fingerprint-cooldown seconds, counted by this greeter
+# for every name typed into it, before a cool-down that long: the greeter
+# stops arming the reader on its own and refuses a login without a
+# password; a password still logs in. pam_fprintd's max-tries holds per
+# conversation only, every re-arm opens a fresh one, and faillock never
+# sees a scan. 9 = three conversations of max-tries 3; 0 = no cap.
 fingerprint-misses = 9
 # Seconds a miss is remembered and a cool-down lasts; 0 = no cap.
 fingerprint-cooldown = 600
