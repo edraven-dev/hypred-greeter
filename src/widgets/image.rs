@@ -150,8 +150,8 @@ fn read_capped(source: impl Read, cap: u64) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= cap).then_some(bytes)
 }
 
-/// Width and height as a PNG's or a JPEG's header gives them, the two
-/// formats GTK decodes itself; `None` for anything else.
+/// Width and height as a PNG's or a JPEG's header gives them, the formats
+/// whose headers are read here; `None` for anything else.
 fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
     if let Some(chunks) = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n") {
         png_size(chunks)
