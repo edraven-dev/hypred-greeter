@@ -381,8 +381,6 @@ fn parse(text: &str) -> Result<(Config, Vec<String>), toml::de::Error> {
 }
 
 impl Loaded {
-    /// A path from the command line is used as given (a relative one from
-    /// the working directory); a `[paths]` value is relative to the config.
     pub fn resolve(&self, cli_override: Option<&Path>, configured: &Path) -> PathBuf {
         match cli_override {
             Some(path) => path.into(),

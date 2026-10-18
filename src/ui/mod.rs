@@ -142,7 +142,6 @@ fn css_problem(
     format!("{file}:{}:{}: {err}", line + 1, column + 1)
 }
 
-/// --check lists every CSS problem the banner counts past its first few.
 pub fn css_lines(problems: Vec<String>, check: bool) -> Vec<String> {
     if check {
         problems
@@ -241,7 +240,6 @@ impl Failed {
     }
 }
 
-/// What [`Failed`] does, kept apart from GTK to be testable.
 #[derive(Default)]
 struct FailedState {
     since: Option<Instant>,
@@ -253,7 +251,6 @@ struct FailedState {
 enum Clear {
     Nothing,
     Now,
-    /// When the hold is over, unless another failure came meanwhile.
     After(Duration, u64),
 }
 
@@ -281,7 +278,6 @@ impl FailedState {
         Clear::Now
     }
 
-    /// A `Clear::After` came due; true if the class goes.
     fn expire(&mut self, ticket: u64) -> bool {
         if self.ticket != ticket {
             return false;
@@ -403,7 +399,6 @@ fn dark_scheme(cfg: &config::Gtk) -> Option<bool> {
 enum Theme<'a> {
     Keep,
     Set(&'a str),
-    /// The theme in force, set again.
     Reload,
 }
 

@@ -81,8 +81,6 @@ fn parse_from(argv: impl IntoIterator<Item = String>) -> Result<Args, String> {
     Ok(args)
 }
 
-/// What --check prints to stderr, and its exit code: every problem the
-/// banner would show, then their count.
 pub fn check_report(problems: &[String]) -> (Vec<String>, i32) {
     let mut lines: Vec<String> = problems.iter().map(|p| format!("check: {p}")).collect();
     lines.push(match problems.len() {
