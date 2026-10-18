@@ -115,13 +115,15 @@ impl WidgetDef for PasswordDef {
                         placeholder_for(None);
                     }
                 }
+                // A re-arm ends a parked prompt with no other event.
+                UiEvent::Armed(true) => placeholder_for(None),
                 UiEvent::Focus(FocusTarget::Password) => {
                     entry.grab_focus();
                 }
                 UiEvent::Focus(FocusTarget::Username)
                 | UiEvent::PamError(_)
                 | UiEvent::SessionChanged(_)
-                | UiEvent::Armed(_)
+                | UiEvent::Armed(false)
                 | UiEvent::Starting
                 | UiEvent::UsernameChanged(_) => {}
             }
