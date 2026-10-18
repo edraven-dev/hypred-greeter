@@ -73,6 +73,20 @@ fn boot_clock() -> Duration {
     Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
+/// What a login took, for the journal: PAM does not say which module let
+/// the user in.
+fn login_path(answered_secret: bool, answered_visible: bool, saw_info: bool) -> &'static str {
+    if answered_secret {
+        "a password prompt answered"
+    } else if answered_visible {
+        "only a visible prompt answered"
+    } else if saw_info {
+        "no prompt answered, after PAM info such as pam_fprintd's"
+    } else {
+        "no prompt answered and no PAM info"
+    }
+}
+
 /// Gets the authenticated user; returns the session's (cmd, env).
 pub type ResolveStart = Box<dyn Fn(&str) -> (Vec<String>, Vec<String>)>;
 
@@ -98,6 +112,7 @@ enum Phase {
         /// The last prompt's text, as PAM worded it.
         asked: String,
         answered_secret: bool,
+        answered_visible: bool,
         /// Opened for the password of a login refused in a cool-down.
         resubmitted: bool,
     },
@@ -385,11 +400,17 @@ impl Auth {
         let mut phase = self.phase.borrow_mut();
         match &mut *phase {
             Phase::Conversing {
-                awaiting_input, passive, asked_secret, answered_secret, ..
+                awaiting_input,
+                passive,
+                asked_secret,
+                answered_secret,
+                answered_visible,
+                ..
             } if *awaiting_input => {
                 *awaiting_input = false;
                 *passive = false;
                 *answered_secret |= *asked_secret;
+                *answered_visible |= !*asked_secret;
                 drop(phase);
                 self.emit(UiEvent::Busy(true));
                 self.send(Request::PostAuthMessageResponse { response });
@@ -614,6 +635,7 @@ impl Auth {
             asked_secret: false,
             asked: String::new(),
             answered_secret: false,
+            answered_visible: false,
             resubmitted: false,
         };
         self.sync_armed();
@@ -901,6 +923,7 @@ impl Auth {
                 passive,
                 stash,
                 answered_secret,
+                answered_visible,
                 saw_info,
                 resubmitted,
                 ..
@@ -950,7 +973,7 @@ impl Auth {
                     return;
                 }
                 let (cmd, env) = (self.hooks.resolve_start)(&user);
-                let how = if answered_secret { "a password" } else { "no password (fingerprint)" };
+                let how = login_path(answered_secret, answered_visible, saw_info);
                 info!("authenticated with {how}; starting session: {}", cmd.join(" "));
                 *self.phase.borrow_mut() = Phase::Starting;
                 self.emit(UiEvent::Busy(true));
@@ -1396,6 +1419,21 @@ mod tests {
         assert_eq!(armed, ["armed true", "armed false", "armed true", "armed false"], "{log:?}");
         let parked = log.iter().position(|e| e.starts_with("prompt")).unwrap();
         assert_eq!(log[parked - 2], "armed false", "{log:?}");
+    }
+
+    #[test]
+    fn the_journal_names_what_a_login_answered_not_a_module_it_cannot_see() {
+        for (secret, visible, info, how) in [
+            (true, false, true, "a password prompt answered"),
+            (true, true, false, "a password prompt answered"),
+            (false, true, false, "only a visible prompt answered"),
+            // A touch, or a scan that timed out and then nullok.
+            (false, false, true, "no prompt answered, after PAM info such as pam_fprintd's"),
+            // nullok and a blank password: pam_unix asks nothing.
+            (false, false, false, "no prompt answered and no PAM info"),
+        ] {
+            assert_eq!(login_path(secret, visible, info), how);
+        }
     }
 
     #[test]
