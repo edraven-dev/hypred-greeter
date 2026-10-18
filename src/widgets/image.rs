@@ -1,6 +1,10 @@
 use gtk4 as gtk;
-use gtk4::gdk;
 use gtk4::prelude::*;
+use gtk4::{gdk, glib, graphene};
+use std::cell::RefCell;
+use std::fs::File;
+use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::layout::Node;
@@ -12,22 +16,40 @@ pub struct ImageDef;
 
 /// GTK's own icon size, what a button's icon gets.
 const ICON_SIZE: i32 = 16;
-/// An avatar is chosen by whoever types a username: a FIFO would block the
-/// main thread in open(2) for good, a huge file or a decompression bomb is
-/// decoded in full before it shows.
+/// An avatar is chosen by whoever types a username, and its owner can swap
+/// the file between any two looks at the path: a FIFO would block the main
+/// thread in open(2) for good, a huge file or a decompression bomb is
+/// decoded in full before it shows. So it is opened once, and only what
+/// that open got is checked and decoded.
 const AVATAR_MAX_BYTES: u64 = 1024 * 1024;
-const AVATAR_MAX_SIDE: i32 = 4096;
+const AVATAR_MAX_SIDE: u32 = 4096;
+/// libjpeg runs every scan of a progressive JPEG over the whole image: a
+/// megabyte of repeated scans is half a minute of CPU at 4096 px, where
+/// encoders write a few dozen at most.
+const JPEG_MAX_SCANS: usize = 100;
 
-/// A theme icon by name, or an image file by absolute path.
 pub fn load_icon(value: &str) -> Result<gtk::Image, WidgetError> {
-    if value.starts_with('/') {
-        return Ok(gtk::Image::from_paintable(Some(&paintable(Path::new(value), ICON_SIZE)?)));
-    }
-    let display = gdk::Display::default();
-    if display.is_some_and(|display| !gtk::IconTheme::for_display(&display).has_icon(value)) {
-        return Err(WidgetError::Other(format!("icon `{value}` is not in the icon theme")));
-    }
-    Ok(gtk::Image::from_icon_name(value))
+    let image = if value.starts_with('/') {
+        gtk::Image::from_paintable(Some(&paintable(Path::new(value), ICON_SIZE)?))
+    } else {
+        let display = gdk::Display::default();
+        if display.is_some_and(|display| !gtk::IconTheme::for_display(&display).has_icon(value)) {
+            return Err(WidgetError::Other(format!("icon `{value}` is not in the icon theme")));
+        }
+        gtk::Image::from_icon_name(value)
+    };
+    Ok(clipped(image))
+}
+
+/// GTK CSS has no `overflow`: clipped, a stylesheet's `border-radius`
+/// rounds the picture and `-gtk-icon-transform: scale()` crops it to its
+/// box. Centred, so that box is the picture's square rather than whatever
+/// a parent stretches it to (a layout's `halign`/`valign` still win).
+fn clipped(image: gtk::Image) -> gtk::Image {
+    image.set_overflow(gtk::Overflow::Hidden);
+    image.set_halign(gtk::Align::Center);
+    image.set_valign(gtk::Align::Center);
+    image
 }
 
 /// An SVG is rendered at `size` by GTK's icon renderer (gdk-pixbuf no
@@ -68,29 +90,138 @@ fn home_in(passwd: &str, user: &str) -> Option<PathBuf> {
     })
 }
 
-/// A regular file of bounded size whose header says a bounded picture
-/// (metadata follows symlinks, so a link to a FIFO is refused too).
-fn readable_picture(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    if !meta.is_file() || meta.len() > AVATAR_MAX_BYTES {
-        return false;
-    }
-    gtk::gdk_pixbuf::Pixbuf::file_info(path)
-        .is_some_and(|(_, width, height)| width <= AVATAR_MAX_SIDE && height <= AVATAR_MAX_SIDE)
+fn avatar(user: &str) -> Option<gdk::Paintable> {
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    avatar_paths(user, &passwd)
+        .iter()
+        .filter_map(|path| read_avatar(path))
+        .find_map(|bytes| gdk::Texture::from_bytes(&bytes).ok())
+        .map(squared)
 }
 
-fn show_avatar(image: &gtk::Image, user: &str, size: Option<i32>) {
-    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
-    let found = avatar_paths(user, &passwd)
-        .into_iter()
-        .filter(|path| readable_picture(path))
-        .find_map(|path| gdk::Texture::from_filename(path).ok());
-    match found {
-        Some(texture) => image.set_paintable(Some(&texture)),
-        None => image.clear(),
+/// A photo's centre square: a picture that is not square would leave bars
+/// in a round or square box. Drawn through a clip, so nothing is copied.
+fn squared(texture: gdk::Texture) -> gdk::Paintable {
+    let (width, height) = (texture.width(), texture.height());
+    if width == height {
+        return texture.upcast();
     }
-    if let Some(size) = size {
-        image.set_pixel_size(size);
+    let (x, y, side) = centre_square(width, height);
+    let (x, y, side) = (x as f32, y as f32, side as f32);
+    let snapshot = gtk::Snapshot::new();
+    snapshot.push_clip(&graphene::Rect::new(0.0, 0.0, side, side));
+    snapshot.append_texture(&texture, &graphene::Rect::new(-x, -y, width as f32, height as f32));
+    snapshot.pop();
+    snapshot
+        .to_paintable(Some(&graphene::Size::new(side, side)))
+        .unwrap_or_else(|| texture.upcast())
+}
+
+/// Offset and side of the largest centred square.
+fn centre_square(width: i32, height: i32) -> (i32, i32, i32) {
+    let side = width.min(height);
+    ((width - side) / 2, (height - side) / 2, side)
+}
+
+fn read_avatar(path: &Path) -> Option<glib::Bytes> {
+    let bytes = read_capped(open_avatar(path)?, AVATAR_MAX_BYTES)?;
+    let (width, height) = picture_size(&bytes)?;
+    (width <= AVATAR_MAX_SIDE && height <= AVATAR_MAX_SIDE).then(|| glib::Bytes::from_owned(bytes))
+}
+
+/// The file if it is a regular one of bounded size. Without O_NONBLOCK
+/// opening a FIFO waits for a writer; with it the open returns and fstat
+/// refuses what it got (a symlink is followed: ~/.face often is one).
+fn open_avatar(path: &Path) -> Option<File> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_file() && meta.len() <= AVATAR_MAX_BYTES).then_some(file)
+}
+
+/// `None` past `cap`, however much the file grew after its size was seen.
+fn read_capped(source: impl Read, cap: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    source.take(cap + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= cap).then_some(bytes)
+}
+
+/// Width and height as a PNG's or a JPEG's header gives them, the formats
+/// whose headers are read here; `None` for anything else.
+fn picture_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if let Some(chunks) = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n") {
+        png_size(chunks)
+    } else if let Some(segments) = bytes.strip_prefix(&[0xff, 0xd8]) {
+        jpeg_size(segments)
+    } else {
+        None
+    }
+}
+
+/// IHDR comes first, as libpng requires: its length, its name, then
+/// width and height.
+fn png_size(chunks: &[u8]) -> Option<(u32, u32)> {
+    let be32 = |at: usize| Some(u32::from_be_bytes(chunks.get(at..at + 4)?.try_into().ok()?));
+    if be32(0)? != 13 || chunks.get(4..8)? != b"IHDR" {
+        return None;
+    }
+    Some((be32(8)?, be32(12)?))
+}
+
+/// The frame header's size, the segments walked as libjpeg walks them; a
+/// scan before the frame, a second frame or a segment libjpeg would not
+/// skip the same way is no picture.
+fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let (mut at, mut size, mut scans) = (0, None, 0);
+    while let Some((marker, next)) = jpeg_marker(bytes, at) {
+        at = next;
+        match marker {
+            0xd9 => break,
+            0xd8 => return None,
+            0xd0..=0xd7 | 0x01 => continue,
+            _ => {}
+        }
+        let length = usize::from(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
+        let segment = bytes.get(at + 2..at + length)?;
+        at += length;
+        match marker {
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf => {
+                let height = u16::from_be_bytes(segment.get(1..3)?.try_into().ok()?);
+                let width = u16::from_be_bytes(segment.get(3..5)?.try_into().ok()?);
+                if size.replace((u32::from(width), u32::from(height))).is_some() {
+                    return None;
+                }
+            }
+            0xda => {
+                size?;
+                scans += 1;
+                if scans > JPEG_MAX_SCANS {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    size
+}
+
+/// The next marker and the offset after it, skipping what libjpeg's
+/// next_marker skips: stray bytes, 0xff fill and the stuffed 0xff 0x00
+/// of entropy-coded data.
+fn jpeg_marker(bytes: &[u8], mut at: usize) -> Option<(u8, usize)> {
+    loop {
+        at += bytes.get(at..)?.iter().position(|&byte| byte == 0xff)?;
+        while bytes.get(at) == Some(&0xff) {
+            at += 1;
+        }
+        let marker = *bytes.get(at)?;
+        at += 1;
+        if marker != 0 {
+            return Some((marker, at));
+        }
     }
 }
 
@@ -105,18 +236,24 @@ impl WidgetDef for ImageDef {
         let image = match sources {
             (Some(file), None, None) => {
                 let path = ctx.resolve_path(Path::new(&file));
-                gtk::Image::from_paintable(Some(&paintable(&path, size.unwrap_or(ICON_SIZE))?))
+                let paintable = paintable(&path, size.unwrap_or(ICON_SIZE))?;
+                clipped(gtk::Image::from_paintable(Some(&paintable)))
             }
             (None, Some(icon), None) => load_icon(&icon)?,
             (None, None, Some(source)) if source == "avatar" => {
-                let image = gtk::Image::new();
-                show_avatar(&image, &ctx.app.username(), size);
+                let image = clipped(gtk::Image::new());
+                let shown = RefCell::new(ctx.app.username());
+                image.set_paintable(avatar(&shown.borrow()).as_ref());
                 let weak = image.downgrade();
                 ctx.bus.subscribe(move |event| {
-                    if let UiEvent::UsernameChanged(user) = event {
-                        if let Some(image) = weak.upgrade() {
-                            show_avatar(&image, user, size);
-                        }
+                    let UiEvent::UsernameChanged(user) = event else { return };
+                    // Startup announces the user this one was built with.
+                    if *user == *shown.borrow() {
+                        return;
+                    }
+                    if let Some(image) = weak.upgrade() {
+                        image.set_paintable(avatar(user).as_ref());
+                        shown.replace(user.clone());
                     }
                 });
                 image
@@ -170,28 +307,104 @@ mod tests {
         0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
 
+    /// PNG_1X1 claiming to be `width` x `height`.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut png = PNG_1X1.to_vec();
+        png[16..20].copy_from_slice(&width.to_be_bytes());
+        png[20..24].copy_from_slice(&height.to_be_bytes());
+        png
+    }
+
+    /// SOI, an APP0 and a frame header, `scans` scans of entropy-coded
+    /// data holding a stuffed 0xff and a restart marker, EOI.
+    fn jpeg(width: u16, height: u16, scans: usize) -> Vec<u8> {
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 0, 4, 0xff, 0xda];
+        jpeg.extend([0xff, 0xff, 0xc0, 0, 11, 8]);
+        jpeg.extend(height.to_be_bytes());
+        jpeg.extend(width.to_be_bytes());
+        jpeg.extend([1, 1, 0x11, 0]);
+        let scan = [0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0x12, 0xff, 0, 0xff, 0xd0, 0x34];
+        jpeg.extend(scan.repeat(scans));
+        jpeg.extend([0xff, 0xd9]);
+        jpeg
+    }
+
+    #[test]
+    fn the_size_comes_from_a_png_or_jpeg_header() {
+        assert_eq!(picture_size(PNG_1X1), Some((1, 1)));
+        assert_eq!(picture_size(&png(8000, 600)), Some((8000, 600)));
+        assert_eq!(picture_size(&PNG_1X1[..20]), None);
+
+        assert_eq!(picture_size(&jpeg(640, 480, 1)), Some((640, 480)));
+        assert_eq!(picture_size(&jpeg(640, 480, JPEG_MAX_SCANS)), Some((640, 480)));
+        assert_eq!(picture_size(&jpeg(640, 480, JPEG_MAX_SCANS + 1)), None);
+        let truncated = jpeg(640, 480, 3);
+        assert_eq!(picture_size(&truncated[..truncated.len() - 8]), Some((640, 480)));
+        let (one_scan, frame) = (jpeg(640, 480, 1), &jpeg(64, 48, 0)[8..22]);
+        let scan_first = [&one_scan[..8], &one_scan[22..]].concat();
+        assert_eq!(picture_size(&scan_first), None);
+        let two_frames = [&one_scan[..8], frame, &one_scan[8..]].concat();
+        assert_eq!(picture_size(&two_frames), None);
+        // libjpeg reads on right after a length below 2; the scans behind
+        // such a segment must not go uncounted.
+        let short = [&one_scan[..22], &[0xff, 0xfe, 0, 1], &one_scan[22..]].concat();
+        assert_eq!(picture_size(&short), None);
+
+        for other in [&b"GIF89a\x01\x00\x01\x00"[..], b"RIFF\0\0\0\0WEBPVP8 ", b"<svg/>", b""] {
+            assert_eq!(picture_size(other), None);
+        }
+    }
+
     #[test]
     fn only_a_bounded_regular_picture_is_readable() {
         let dir = std::env::temp_dir().join(format!("hg-avatar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!readable_picture(&dir));
-        assert!(!readable_picture(&dir.join("missing.png")));
-        let big = dir.join("big.png");
-        std::fs::write(&big, vec![0u8; AVATAR_MAX_BYTES as usize + 1]).unwrap();
-        assert!(!readable_picture(&big));
-        let fifo = dir.join("face");
+        let file = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        assert!(read_avatar(&dir).is_none());
+        assert!(read_avatar(&dir.join("missing.png")).is_none());
+        assert!(read_avatar(&file("big.png", &vec![0; AVATAR_MAX_BYTES as usize + 1])).is_none());
+        assert!(read_avatar(&file("junk.png", b"not a picture")).is_none());
+        assert!(read_avatar(&file("wide.png", &png(AVATAR_MAX_SIDE + 1, 16))).is_none());
+        assert!(read_avatar(&file("tall.jpg", &jpeg(16, 4097, 1))).is_none());
+        assert!(read_avatar(&file("max.png", &png(AVATAR_MAX_SIDE, AVATAR_MAX_SIDE))).is_some());
+        let one = file("one.png", PNG_1X1);
+        assert_eq!(read_avatar(&one).as_deref(), Some(PNG_1X1));
+        let to_one = dir.join(".face");
+        std::os::unix::fs::symlink(&one, &to_one).unwrap();
+        assert_eq!(read_avatar(&to_one).as_deref(), Some(PNG_1X1));
+
+        // Opening a FIFO without a writer the plain way would wait for one.
+        let fifo = dir.join("fifo");
         assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
-        assert!(!readable_picture(&fifo));
-        let link = dir.join("link.png");
-        std::os::unix::fs::symlink(&fifo, &link).unwrap();
-        assert!(!readable_picture(&link));
-        let junk = dir.join("junk.png");
-        std::fs::write(&junk, b"not a picture").unwrap();
-        assert!(!readable_picture(&junk));
-        let png = dir.join("one.png");
-        std::fs::write(&png, PNG_1X1).unwrap();
-        assert!(readable_picture(&png));
+        let to_fifo = dir.join("to-fifo.png");
+        std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let paths = [fifo, to_fifo];
+        std::thread::spawn(move || tx.send(paths.map(|path| read_avatar(&path).is_none())));
+        let refused = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(refused, Ok([true, true]), "a FIFO must be refused at once");
+
+        let grows = file("grows.png", PNG_1X1);
+        let checked = open_avatar(&grows).unwrap();
+        let mut append = std::fs::OpenOptions::new().append(true).open(&grows).unwrap();
+        std::io::Write::write_all(&mut append, &vec![0; AVATAR_MAX_BYTES as usize]).unwrap();
+        assert!(read_capped(checked, AVATAR_MAX_BYTES).is_none());
+        assert!(read_capped(std::io::repeat(0), AVATAR_MAX_BYTES).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picture_that_is_not_square_shows_its_centre_square() {
+        assert_eq!(centre_square(300, 200), (50, 0, 200));
+        assert_eq!(centre_square(200, 300), (0, 50, 200));
+        assert_eq!(centre_square(4096, 1), (2047, 0, 1));
+        assert_eq!(centre_square(5, 2), (1, 0, 2));
+        assert_eq!(centre_square(64, 64), (0, 0, 64));
     }
 
     #[test]

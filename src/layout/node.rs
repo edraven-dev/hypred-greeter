@@ -51,7 +51,6 @@ pub struct Common {
     pub width: Option<Size>,
     pub height: Option<Size>,
     pub visible: Option<bool>,
-    /// Grab focus once mapped.
     pub focus: Option<bool>,
     pub focusable: Option<bool>,
 }

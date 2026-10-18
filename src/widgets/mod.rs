@@ -51,7 +51,6 @@ impl fmt::Display for WidgetError {
     }
 }
 
-/// `xalign`, `justify`, `ellipsize`, `lines`, `markup` — for any text widget.
 pub fn apply_text_props(label: &gtk::Label, node: &Node) -> Result<(), WidgetError> {
     if let Some(xalign) = node.props.float("xalign")? {
         label.set_xalign(unit("xalign", xalign)?);

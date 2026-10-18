@@ -13,6 +13,7 @@ pub struct Config {
     pub gtk: Gtk,
     pub auth: Auth,
     pub commands: Commands,
+    pub keys: Keys,
     pub sessions: Sessions,
     pub texts: Texts,
 }
@@ -77,14 +78,14 @@ pub struct Gtk {
 pub struct Auth {
     pub eager: bool,
     pub rearm_window: Rearm,
-    /// The username shown when nothing is remembered.
     pub user: Option<String>,
+    pub fixed_user: bool,
     /// Seconds text left in the password entry keeps a parked prompt ready
     /// after the last input — a stray key must not switch the reader off.
     pub typing_hold: u64,
-    /// How long the username entry has to settle before an eager
-    /// conversation opens for the name typed.
     pub username_debounce_ms: u64,
+    pub fingerprint_misses: u32,
+    pub fingerprint_cooldown: u64,
 }
 
 impl Default for Auth {
@@ -93,9 +94,22 @@ impl Default for Auth {
             eager: false,
             rearm_window: Rearm::Never,
             user: None,
+            fixed_user: false,
             typing_hold: 30,
             username_debounce_ms: 400,
+            fingerprint_misses: 9,
+            fingerprint_cooldown: 600,
         }
+    }
+}
+
+impl Auth {
+    fn problems(&mut self) -> Vec<String> {
+        if self.fixed_user && self.user.as_deref().is_none_or(str::is_empty) {
+            self.fixed_user = false;
+            return vec!["`auth.fixed-user` pins `auth.user`, which is not set; ignored".into()];
+        }
+        Vec::new()
     }
 }
 
@@ -143,7 +157,6 @@ impl<'de> Deserialize<'de> for Rearm {
     }
 }
 
-/// Name → argv, for `button` actions and the power buttons.
 #[derive(Debug)]
 pub struct Commands(pub HashMap<String, Vec<String>>);
 
@@ -172,22 +185,46 @@ impl<'de> Deserialize<'de> for Commands {
     }
 }
 
+/// `[keys]`: accelerator as GTK reads it → action name, in file order (toml
+/// keeps it with `preserve_order`), so of two spellings of one key the
+/// first written wins.
+#[derive(Debug, Default)]
+pub struct Keys(pub Vec<(String, String)>);
+
+impl<'de> Deserialize<'de> for Keys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Keys;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a table of \"key\" = \"action\"")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                let mut keys = Vec::new();
+                while let Some(entry) = map.next_entry()? {
+                    keys.push(entry);
+                }
+                Ok(Keys(keys))
+            }
+        }
+
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Sessions {
     pub x11_prefix: Vec<String>,
     pub env: Vec<String>,
-    /// Session id ("wayland/hyprland-uwsm") preselected for a user with
-    /// nothing remembered; else the first by name.
     pub default: Option<String>,
-    /// Ids: `only` keeps just these, `hide` drops these, `order` lists
-    /// these first (the rest follow by name).
     pub only: Vec<String>,
     pub hide: Vec<String>,
     pub order: Vec<String>,
-    /// Appended to the display name of X11 sessions.
     pub x11_suffix: String,
-    /// Id → display name (`[sessions.names]`).
     pub names: HashMap<String, String>,
 }
 
@@ -211,10 +248,9 @@ impl Default for Sessions {
 pub struct Texts {
     pub enter_username: String,
     pub username_changed: String,
-    /// When greetd's error description is empty.
     pub auth_failed: String,
-    /// `{program}` and `{error}` are filled in.
     pub power_failed: String,
+    pub fingerprint_locked: String,
     pub rewrite: Vec<Rewrite>,
 }
 
@@ -225,6 +261,7 @@ impl Default for Texts {
             username_changed: "username changed — enter the password again".into(),
             auth_failed: "authentication failed".into(),
             power_failed: "{program}: {error}".into(),
+            fingerprint_locked: "too many fingerprint attempts — use your password".into(),
             rewrite: vec![],
         }
     }
@@ -243,13 +280,14 @@ pub struct Rewrite {
     pub text: String,
     #[serde(default)]
     pub kind: Option<TextKind>,
-    /// Compiled once, on first use.
     #[serde(skip)]
     compiled: std::cell::OnceCell<Result<glib::Regex, String>>,
 }
 
-/// `error`: a PAM message mid-conversation; `failure`: a conversation
-/// that ended in an error.
+/// `error`: a PAM error message, a conversation that failed on its own,
+/// power-failed and fingerprint-locked; `failure`: the end of a
+/// conversation the user submitted to, enter-username and
+/// username-changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextKind {
@@ -295,7 +333,6 @@ impl Texts {
 }
 
 impl Rewrite {
-    /// A `regex = true` rule's pattern; `None` for a substring rule.
     fn compiled(&self) -> Option<Result<&glib::Regex, &str>> {
         if !self.regex {
             return None;
@@ -310,8 +347,6 @@ impl Rewrite {
         Some(compiled.as_ref().map_err(String::as_str))
     }
 
-    /// `Some` when the rule matches; a regex rule expands `\1` references
-    /// in `text`.
     fn apply(&self, text: &str) -> Option<String> {
         let Some(regex) = self.compiled() else {
             return text.contains(&self.pattern).then(|| self.text.clone());
@@ -352,15 +387,14 @@ pub fn load(cli_path: Option<&Path>) -> Loaded {
     };
 
     let config = match parse(&text) {
-        Ok((config, unknown)) => {
+        Ok((mut config, unknown)) => {
             // A misspelt key silently leaves its default in force
             // (`rearm_window` would switch re-arming off): say so on screen.
             problems.extend(
                 unknown.iter().map(|key| format!("config {}: unknown key `{key}`", path.display())),
             );
-            problems.extend(
-                config.texts.problems().iter().map(|p| format!("config {}: {p}", path.display())),
-            );
+            let found = config.texts.problems().into_iter().chain(config.auth.problems());
+            problems.extend(found.map(|p| format!("config {}: {p}", path.display())));
             config
         }
         Err(err) => {
@@ -382,11 +416,9 @@ fn parse(text: &str) -> Result<(Config, Vec<String>), toml::de::Error> {
 
 impl Loaded {
     pub fn resolve(&self, cli_override: Option<&Path>, configured: &Path) -> PathBuf {
-        let path = cli_override.unwrap_or(configured);
-        if path.is_absolute() {
-            path.into()
-        } else {
-            self.base_dir.join(path)
+        match cli_override {
+            Some(path) => path.into(),
+            None => self.base_dir.join(configured),
         }
     }
 }
@@ -400,6 +432,12 @@ mod tests {
         let config = parse("").unwrap().0;
         assert_eq!(config.commands.get("reboot").unwrap(), ["systemctl", "reboot"]);
         assert_eq!(config.paths.style, PathBuf::from("style.css"));
+    }
+
+    #[test]
+    fn the_shipped_config_names_only_known_keys() {
+        let (_, unknown) = parse(include_str!("../data/config.toml")).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
     }
 
     #[test]
@@ -418,6 +456,37 @@ mod tests {
         assert_eq!(parse("").unwrap().0.auth.user, None);
         let config = parse("[auth]\nuser = \"edraven\"\n").unwrap().0;
         assert_eq!(config.auth.user.as_deref(), Some("edraven"));
+    }
+
+    #[test]
+    fn fixed_user_pins_only_a_configured_user() {
+        let mut auth = parse("[auth]\nuser = \"edraven\"\nfixed-user = true\n").unwrap().0.auth;
+        assert!(auth.problems().is_empty());
+        assert!(auth.fixed_user);
+        assert!(!parse("").unwrap().0.auth.fixed_user);
+        for unset in ["[auth]\nfixed-user = true\n", "[auth]\nuser = \"\"\nfixed-user = true\n"] {
+            let mut auth = parse(unset).unwrap().0.auth;
+            let problems = auth.problems();
+            assert_eq!(problems.len(), 1, "{unset}: {problems:?}");
+            assert!(problems[0].starts_with("`auth.fixed-user` pins `auth.user`"), "{problems:?}");
+            assert!(!auth.fixed_user, "{unset}");
+        }
+    }
+
+    #[test]
+    fn keys_keep_their_accelerators_verbatim_and_in_file_order() {
+        let text = "[keys]\n\"<Super>s\" = \"suspend\"\n\"<Control><Alt>Delete\" = \"reboot\"\n\
+                    F2 = \"next-session\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let keys: Vec<(&str, &str)> =
+            config.keys.0.iter().map(|(key, action)| (key.as_str(), action.as_str())).collect();
+        assert_eq!(
+            keys,
+            [("<Super>s", "suspend"), ("<Control><Alt>Delete", "reboot"), ("F2", "next-session")]
+        );
+        assert!(parse("").unwrap().0.keys.0.is_empty());
+        assert!(parse("[keys]\nF2 = 2\n").is_err());
     }
 
     #[test]
@@ -561,6 +630,34 @@ mod tests {
     }
 
     #[test]
+    fn the_fingerprint_cap_defaults_and_parses() {
+        let config = parse("").unwrap().0;
+        assert_eq!(config.auth.fingerprint_misses, 9);
+        assert_eq!(config.auth.fingerprint_cooldown, 600);
+        let locked = "too many fingerprint attempts — use your password";
+        assert_eq!(config.texts.fingerprint_locked, locked);
+        let text = "[auth]\nfingerprint-misses = 0\nfingerprint-cooldown = 30\n\
+                    [texts]\nfingerprint-locked = \"nope\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(config.auth.fingerprint_misses, 0);
+        assert_eq!(config.auth.fingerprint_cooldown, 30);
+        assert_eq!(config.texts.fingerprint_locked, "nope");
+        assert!(parse("[auth]\nfingerprint-misses = -1\n").is_err());
+        assert!(parse("[auth]\nfingerprint-cooldown = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_shipped_config_documents_the_fingerprint_cap_defaults() {
+        let (config, unknown) = parse(include_str!("../data/config.toml")).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let (shipped, default) = (config.auth, Auth::default());
+        assert_eq!(shipped.fingerprint_misses, default.fingerprint_misses);
+        assert_eq!(shipped.fingerprint_cooldown, default.fingerprint_cooldown);
+        assert_eq!(config.texts.fingerprint_locked, Texts::default().fingerprint_locked);
+    }
+
+    #[test]
     fn rearm_window_takes_seconds_or_always() {
         let rearm = |text: &str| parse(text).map(|(config, _)| config.auth.rearm_window);
         assert_eq!(rearm("[auth]\nrearm-window = 0\n").unwrap(), Rearm::Never);
@@ -582,6 +679,19 @@ mod tests {
     fn sessions_default_parses() {
         let (config, _) = parse("[sessions]\ndefault = \"wayland/hyprland-uwsm\"\n").unwrap();
         assert_eq!(config.sessions.default.as_deref(), Some("wayland/hyprland-uwsm"));
+    }
+
+    #[test]
+    fn cli_paths_are_taken_as_given_and_config_paths_follow_the_config() {
+        let loaded = load(Some(Path::new("/nonexistent/hypred-greeter/config.toml")));
+        let style = Path::new("style.css");
+        let resolve =
+            |cli: Option<&str>, configured: &Path| loaded.resolve(cli.map(Path::new), configured);
+        assert_eq!(resolve(None, style), Path::new("/nonexistent/hypred-greeter/style.css"));
+        assert_eq!(resolve(None, Path::new("/usr/share/x.css")), Path::new("/usr/share/x.css"));
+        assert_eq!(resolve(Some("./mytheme.css"), style), Path::new("./mytheme.css"));
+        assert_eq!(resolve(Some("themes/a/greeter.css"), style), Path::new("themes/a/greeter.css"));
+        assert_eq!(resolve(Some("/srv/theme.css"), style), Path::new("/srv/theme.css"));
     }
 
     #[test]

@@ -9,15 +9,23 @@
 //! greeter sends is processed, so a password typed meanwhile is stashed
 //! and answers the next secret prompt. Only a fresh conversation re-arms
 //! the reader, hence the restart of a parked conversation. A conversation
-//! is only ever answered, restarted or started for the user shown in the
-//! username entry. With a remembered user and session nothing has to be
-//! pressed: the reader is armed as the greeter appears, a touch starts the
-//! session, and `rearm-window = "always"` keeps it that way for as long as
-//! the greeter is up — and on screen: a greeter on a VT nobody looks at
-//! arms nothing, the reader belongs to the VT in front of the user.
+//! is only ever answered, restarted or started for the username shown.
+//! With a remembered user and session nothing has to be pressed: the
+//! reader is armed as the greeter appears, a touch starts the session, and
+//! `rearm-window = "always"` keeps it that way for as long as the greeter
+//! is up — and on screen: a greeter on a VT nobody looks at arms nothing,
+//! the reader belongs to the VT in front of the user.
+//!
+//! pam_fprintd's max-tries holds per conversation only and faillock never
+//! sees a scan, so re-arming alone would make fingerprint tries unlimited:
+//! `fingerprint-misses` within `fingerprint-cooldown` start a cool-down in
+//! which the greeter opens nothing on its own and refuses a login no
+//! password was answered in. The same gate waits out an fprintd that can no
+//! longer claim the reader.
 
 use gtk4::glib;
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
@@ -25,8 +33,8 @@ use greetd_ipc::{AuthMessageType, Request, Response};
 
 use crate::backend::{Backend, BackendError};
 use crate::config::{self, Rearm, TextKind};
-use crate::log::{error, info};
-use crate::ui::bus::{Bus, UiEvent};
+use crate::log::{error, info, warn_};
+use crate::ui::bus::{Bus, FocusTarget, UiEvent};
 
 /// A park sooner than this after CreateSession means no cycle ran.
 const REARM_SPIN_GUARD: Duration = Duration::from_secs(1);
@@ -44,16 +52,48 @@ const RETRY_CAP: Duration = Duration::from_secs(60);
 const RETRY_LIMIT: u32 = 3;
 /// How often a greeter that is off screen looks whether it is back.
 const SEAT_POLL: Duration = Duration::from_secs(1);
+/// pam_fprintd's text for a scan that did not match. Never translated:
+/// greetd's PAM worker runs without setlocale.
+const MISSED: &str = "Failed to match fingerprint";
+/// Passive conversations in a row that park without a word from
+/// pam_fprintd before fprintd is waited out.
+const INSTANT_PARKS: u32 = 3;
+/// fprintd exits 30 s after its last client; the next one starts clean.
+/// A GLib timer, like fprintd's own: a suspend pauses both.
+const WAIT_OUT: Duration = Duration::from_secs(31);
+/// How often a cool-down looks at the boot clock: a GLib timer stands
+/// still through a suspend, the cool-down's seconds do not.
+const COOLDOWN_CHECK: Duration = Duration::from_secs(1);
+
+/// Time since boot, a suspend included; Instant does not count one.
+fn boot_clock() -> Duration {
+    let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes only the timespec it is handed.
+    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) };
+    Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
+/// What a login took, for the journal: PAM does not say which module let
+/// the user in.
+fn login_path(answered_secret: bool, answered_visible: bool, saw_info: bool) -> &'static str {
+    if answered_secret {
+        "a password prompt answered"
+    } else if answered_visible {
+        "only a visible prompt answered"
+    } else if saw_info {
+        "no prompt answered, after PAM info such as pam_fprintd's"
+    } else {
+        "no prompt answered and no PAM info"
+    }
+}
 
 /// Gets the authenticated user; returns the session's (cmd, env).
 pub type ResolveStart = Box<dyn Fn(&str) -> (Vec<String>, Vec<String>)>;
 
 pub struct Hooks {
-    /// The name in the username entry.
     pub current_username: Box<dyn Fn() -> String>,
     pub resolve_start: ResolveStart,
     pub on_started: Box<dyn Fn()>,
-    /// Whether this greeter's VT is the one on screen.
     pub seat_active: Box<dyn Fn() -> bool>,
 }
 
@@ -68,6 +108,13 @@ enum Phase {
         passive: bool,
         saw_info: bool,
         started: Instant,
+        asked_secret: bool,
+        /// The last prompt's text, as PAM worded it.
+        asked: String,
+        answered_secret: bool,
+        answered_visible: bool,
+        /// Opened for the password of a login refused in a cool-down.
+        resubmitted: bool,
     },
     Starting,
 }
@@ -101,6 +148,22 @@ pub struct Auth {
     typing_hold: Cell<Duration>,
     seat_poll: Cell<Duration>,
     seat_waiting: Cell<bool>,
+    miss_cap: u32,
+    cooldown: Cell<Duration>,
+    cooldown_check: Cell<Duration>,
+    clock: Cell<fn() -> Duration>,
+    /// When the misses still remembered came, on the boot clock, oldest
+    /// first.
+    misses: RefCell<VecDeque<Duration>>,
+    /// Through a cool-down: when it ends, on the boot clock.
+    cool_until: Cell<Option<Duration>>,
+    /// The cool-down text is the last thing shown, as far as auth can tell.
+    cooling_shown: Cell<bool>,
+    /// Whose passive conversations parked without a fingerprint wait, and
+    /// how many in a row.
+    instant_parks: RefCell<(String, u32)>,
+    wait_out: Cell<Duration>,
+    waiting_out: Cell<bool>,
     hooks: Hooks,
 }
 
@@ -146,6 +209,16 @@ impl Auth {
             typing_hold: Cell::new(Duration::from_secs(options.typing_hold)),
             seat_poll: Cell::new(SEAT_POLL),
             seat_waiting: Cell::new(false),
+            miss_cap: options.fingerprint_misses,
+            cooldown: Cell::new(Duration::from_secs(options.fingerprint_cooldown)),
+            cooldown_check: Cell::new(COOLDOWN_CHECK),
+            clock: Cell::new(boot_clock),
+            misses: RefCell::default(),
+            cool_until: Cell::new(None),
+            cooling_shown: Cell::new(false),
+            instant_parks: RefCell::default(),
+            wait_out: Cell::new(WAIT_OUT),
+            waiting_out: Cell::new(false),
             hooks,
         });
 
@@ -188,10 +261,23 @@ impl Auth {
             UiEvent::Busy(_)
             | UiEvent::SessionChanged(_)
             | UiEvent::Armed(_)
+            | UiEvent::FingerprintLocked(_)
             | UiEvent::Starting
             | UiEvent::Focus(_)
             | UiEvent::UsernameChanged(_) => event,
         };
+        // The message widget keeps its text over a passive secret prompt
+        // (unless its secret-prompts says otherwise).
+        if matches!(
+            event,
+            UiEvent::Info(_)
+                | UiEvent::PamError(_)
+                | UiEvent::AuthError(_)
+                | UiEvent::Prompt { passive: false, .. }
+                | UiEvent::Prompt { secret: false, .. }
+        ) {
+            self.cooling_shown.set(false);
+        }
         self.bus.emit(&event);
     }
 
@@ -220,6 +306,10 @@ impl Auth {
         if username.is_empty() {
             return;
         }
+        if self.held() {
+            self.pending_rearm.set(true);
+            return self.remind_cooling();
+        }
         if (self.hooks.seat_active)() {
             self.open(username.to_string(), None, true);
         } else {
@@ -241,7 +331,9 @@ impl Auth {
             return;
         }
         if username.is_empty() {
+            // Focus after the error: the password entry grabs it on every AuthError.
             self.emit(UiEvent::AuthError(self.texts.enter_username.clone()));
+            self.emit(UiEvent::Focus(FocusTarget::Username));
             return;
         }
         self.emit(UiEvent::Busy(true));
@@ -294,10 +386,11 @@ impl Auth {
     /// Armed: a passive conversation waits on the module with nothing
     /// submitted — a touch alone would log in. Told once per change.
     fn sync_armed(&self) {
-        let armed = matches!(
-            *self.phase.borrow(),
-            Phase::Conversing { passive: true, awaiting_input: false, .. }
-        );
+        let armed = !self.cooling()
+            && matches!(
+                *self.phase.borrow(),
+                Phase::Conversing { passive: true, awaiting_input: false, .. }
+            );
         if self.armed.replace(armed) != armed {
             self.bus.emit(&UiEvent::Armed(armed));
         }
@@ -306,9 +399,18 @@ impl Auth {
     pub fn respond(&self, response: Option<String>) {
         let mut phase = self.phase.borrow_mut();
         match &mut *phase {
-            Phase::Conversing { awaiting_input, passive, .. } if *awaiting_input => {
+            Phase::Conversing {
+                awaiting_input,
+                passive,
+                asked_secret,
+                answered_secret,
+                answered_visible,
+                ..
+            } if *awaiting_input => {
                 *awaiting_input = false;
                 *passive = false;
+                *answered_secret |= *asked_secret;
+                *answered_visible |= !*asked_secret;
                 drop(phase);
                 self.emit(UiEvent::Busy(true));
                 self.send(Request::PostAuthMessageResponse { response });
@@ -345,7 +447,7 @@ impl Auth {
     pub fn note_activity(&self) {
         self.last_activity.set(Instant::now());
         self.quick_ends.set(0);
-        if !self.eager || !self.cooled_down() {
+        if !self.eager || self.held() || !self.past_restart_cooldown() {
             return;
         }
         if self.pending_rearm.get() {
@@ -369,7 +471,7 @@ impl Auth {
         }
     }
 
-    fn cooled_down(&self) -> bool {
+    fn past_restart_cooldown(&self) -> bool {
         self.last_restart.get().is_none_or(|at| at.elapsed() >= RESTART_COOLDOWN)
     }
 
@@ -385,13 +487,7 @@ impl Auth {
         if !(self.hooks.seat_active)() {
             return self.wait_for_seat();
         }
-        let cycled = match &*self.phase.borrow() {
-            Phase::Conversing { saw_info, started, .. } => {
-                *saw_info && started.elapsed() >= REARM_SPIN_GUARD
-            }
-            _ => false,
-        };
-        if !cycled {
+        if !self.cycle_ran() {
             return self.schedule_retry(false);
         }
         self.quick_ends.set(0);
@@ -404,6 +500,18 @@ impl Auth {
         };
         if attentive {
             self.restart_unless_typing();
+        }
+    }
+
+    /// Something was said and the park came later than one at once does:
+    /// pam_fprintd waited for a finger. pam_faillock's lock notice or a
+    /// cycle cut short right away is no wait.
+    fn cycle_ran(&self) -> bool {
+        match &*self.phase.borrow() {
+            Phase::Conversing { saw_info, started, .. } => {
+                *saw_info && started.elapsed() >= REARM_SPIN_GUARD
+            }
+            _ => false,
         }
     }
 
@@ -431,6 +539,7 @@ impl Auth {
     fn schedule_retry(&self, failed: bool) {
         let ended = self.quick_ends.get();
         if !self.eager
+            || self.held()
             || self.rearm == Rearm::Never
             || (self.rearm != Rearm::Always && ended >= RETRY_LIMIT)
         {
@@ -489,7 +598,7 @@ impl Auth {
 
     fn restart(&self) {
         let user = match &*self.phase.borrow() {
-            Phase::Conversing { user, .. } => user.clone(),
+            Phase::Conversing { user, .. } if !self.held() => user.clone(),
             _ => return,
         };
         self.abandon_conversation();
@@ -523,9 +632,21 @@ impl Auth {
             passive,
             saw_info: false,
             started: Instant::now(),
+            asked_secret: false,
+            asked: String::new(),
+            answered_secret: false,
+            answered_visible: false,
+            resubmitted: false,
         };
         self.sync_armed();
         self.send(Request::CreateSession { username: user });
+    }
+
+    fn resubmit(&self, user: String, password: String) {
+        self.open(user, Some(password), false);
+        if let Phase::Conversing { resubmitted, .. } = &mut *self.phase.borrow_mut() {
+            *resubmitted = true;
+        }
     }
 
     /// The CancelSession is stamped with the OLD generation so even its own
@@ -588,7 +709,10 @@ impl Auth {
         match kind {
             AuthMessageType::Secret => {
                 let stashed = match &mut *self.phase.borrow_mut() {
-                    Phase::Conversing { stash, .. } => stash.take(),
+                    Phase::Conversing { stash, answered_secret, .. } => {
+                        *answered_secret |= stash.is_some();
+                        stash.take()
+                    }
                     _ => None,
                 };
                 match stashed {
@@ -609,25 +733,184 @@ impl Auth {
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
             AuthMessageType::Error => {
+                // Counted on PAM's own text: a rewrite rule may change or drop it.
+                let capped = text == MISSED && self.count_miss();
                 self.emit(UiEvent::PamError(text));
+                if capped {
+                    self.start_cooldown();
+                }
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
         }
     }
 
     fn await_input(&self, secret: bool, text: String) {
-        let passive = match &mut *self.phase.borrow_mut() {
-            Phase::Conversing { awaiting_input, passive, .. } => {
+        let cycled = self.cycle_ran();
+        let (passive, user) = match &mut *self.phase.borrow_mut() {
+            Phase::Conversing { user, awaiting_input, passive, asked_secret, asked, .. } => {
                 *awaiting_input = true;
-                *passive
+                *asked_secret = secret;
+                asked.clone_from(&text);
+                (*passive, user.clone())
             }
-            _ => false,
+            _ => (false, String::new()),
         };
         self.sync_armed();
         self.emit(UiEvent::Busy(false));
         self.emit(UiEvent::Prompt { secret, text, passive });
         if passive {
+            self.note_park(user, cycled);
+            // Whatever cooling_shown says: a message widget may show the
+            // prompt over it. A visible one (an OTP) is not the password.
+            if secret && self.cooling() {
+                self.say_cooling();
+            }
             self.maybe_rearm();
+        }
+    }
+
+    /// fprintd 1.94.5 + libfprint 1.94.100: a Release while the reader is
+    /// suspended (the lid closed mid-scan) leaves the device open, and every
+    /// Claim fails at once until fprintd exits, 30 s after its last client —
+    /// which every retry and every input-driven re-arm is. Such parks look
+    /// like a reader claimed elsewhere or a user without prints; a few in a
+    /// row for one user hold every passive open past that exit, once. Per
+    /// user: the names typed on the way to a username have no prints.
+    fn note_park(&self, user: String, cycled: bool) {
+        let mut run = self.instant_parks.borrow_mut();
+        if cycled || run.0 != user {
+            *run = (user, 0);
+        }
+        if cycled {
+            return;
+        }
+        run.1 += 1;
+        if run.1 < INSTANT_PARKS {
+            return;
+        }
+        let parks = std::mem::take(&mut run.1);
+        drop(run);
+        self.waiting_out.set(true);
+        let wait = self.wait_out.get();
+        info!(
+            "{parks} conversations in a row reached a prompt without a fingerprint wait: \
+             opening none for {} s, so a stuck fprintd can exit",
+            wait.as_secs()
+        );
+        let me = self.me.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(wait).await;
+            if let Some(auth) = me.upgrade() {
+                auth.waiting_out.set(false);
+                info!("waited fprintd out; re-arming as usual");
+                auth.release();
+            }
+        });
+    }
+
+    /// The one gate every passive open passes: shut through a fingerprint
+    /// cool-down and while fprintd is waited out. A parked prompt stays
+    /// parked, ready for a password.
+    fn held(&self) -> bool {
+        self.cooling() || self.waiting_out.get()
+    }
+
+    fn cooling(&self) -> bool {
+        self.cool_until.get().is_some()
+    }
+
+    fn release(&self) {
+        if !self.eager || self.held() {
+            return;
+        }
+        if self.parked_for_shown_user() {
+            self.maybe_rearm();
+        } else if self.pending_rearm.get() && self.rearm != Rearm::Never {
+            self.resume();
+        }
+    }
+
+    /// A miss in any conversation counts until it is a cool-down old; true
+    /// when this one reaches the cap. One during a cool-down is not counted.
+    fn count_miss(&self) -> bool {
+        let window = self.cooldown.get();
+        if self.miss_cap == 0 || window.is_zero() || self.cooling() {
+            return false;
+        }
+        let now = self.clock.get()();
+        let mut misses = self.misses.borrow_mut();
+        misses.retain(|at| now.saturating_sub(*at) < window);
+        misses.push_back(now);
+        let (count, cap) = (misses.len(), self.miss_cap);
+        info!("fingerprint did not match: {count} of {cap} within {} s", window.as_secs());
+        count >= cap as usize
+    }
+
+    fn start_cooldown(&self) {
+        let cooldown = self.cooldown.get();
+        let seconds = cooldown.as_secs();
+        warn_!("fingerprint cool-down for {seconds} s: no arming, no login without a password");
+        self.cool_until.set(Some(self.clock.get()().saturating_add(cooldown)));
+        let me = self.me.clone();
+        glib::spawn_future_local(async move {
+            while let Some(wait) = me.upgrade().and_then(|auth| auth.cooldown_wait()) {
+                glib::timeout_future(wait).await;
+            }
+        });
+        self.emit(UiEvent::FingerprintLocked(true));
+        self.sync_armed();
+        self.say_cooling();
+    }
+
+    /// How long to wait before the boot clock is looked at again; `None`
+    /// once the cool-down is over, which this ends when its time has come.
+    fn cooldown_wait(&self) -> Option<Duration> {
+        let left = self.cool_until.get()?.saturating_sub(self.clock.get()());
+        if left.is_zero() {
+            self.end_cooldown();
+            return None;
+        }
+        // GLib counts whole milliseconds: less than one would be no wait.
+        Some(left.min(self.cooldown_check.get()).max(Duration::from_millis(1)))
+    }
+
+    fn end_cooldown(&self) {
+        self.cool_until.set(None);
+        info!("fingerprint cool-down over");
+        self.emit(UiEvent::FingerprintLocked(false));
+        if self.cooling_shown.get() {
+            self.emit(UiEvent::Info(String::new()));
+            // Every widget takes an empty info for a dropped conversation.
+            if let Some(prompt) = self.pending_prompt() {
+                self.emit(prompt);
+            }
+        }
+        self.sync_armed();
+        self.release();
+    }
+
+    fn pending_prompt(&self) -> Option<UiEvent> {
+        match &*self.phase.borrow() {
+            Phase::Conversing { awaiting_input: true, asked_secret, asked, passive, .. } => {
+                Some(UiEvent::Prompt {
+                    secret: *asked_secret,
+                    text: asked.clone(),
+                    passive: *passive,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn say_cooling(&self) {
+        self.emit(UiEvent::PamError(self.texts.fingerprint_locked.clone()));
+        self.cooling_shown.set(true);
+    }
+
+    /// Shown again where the greeter would have armed the reader.
+    fn remind_cooling(&self) {
+        if self.cooling() && !self.cooling_shown.get() {
+            self.say_cooling();
         }
     }
 
@@ -635,7 +918,16 @@ impl Auth {
         let phase = std::mem::replace(&mut *self.phase.borrow_mut(), Phase::Idle);
         self.sync_armed();
         match phase {
-            Phase::Conversing { user, passive, .. } => {
+            Phase::Conversing {
+                user,
+                passive,
+                stash,
+                answered_secret,
+                answered_visible,
+                saw_info,
+                resubmitted,
+                ..
+            } => {
                 let shown = (self.hooks.current_username)();
                 if user != shown {
                     // Authenticated while the username was being edited:
@@ -658,8 +950,31 @@ impl Auth {
                     self.pending_rearm.set(true);
                     return self.wait_for_seat();
                 }
+                if self.cooling() && !answered_secret {
+                    warn_!("fingerprint cool-down: refused a login no password was answered in");
+                    self.abandon_conversation();
+                    match stash {
+                        // Never asked for in this one: a new conversation asks
+                        // for it unless touched again. Once, and only after a
+                        // scan: a stack that lets the user in without asking
+                        // would loop.
+                        Some(password) if saw_info && !resubmitted => {
+                            self.say_cooling();
+                            self.resubmit(user, password);
+                        }
+                        _ => {
+                            if !passive {
+                                self.emit(UiEvent::Busy(false));
+                            }
+                            self.say_cooling();
+                            self.pending_rearm.set(self.eager);
+                        }
+                    }
+                    return;
+                }
                 let (cmd, env) = (self.hooks.resolve_start)(&user);
-                info!("authenticated; starting session: {}", cmd.join(" "));
+                let how = login_path(answered_secret, answered_visible, saw_info);
+                info!("authenticated with {how}; starting session: {}", cmd.join(" "));
                 *self.phase.borrow_mut() = Phase::Starting;
                 self.emit(UiEvent::Busy(true));
                 self.emit(UiEvent::Starting);
@@ -698,14 +1013,29 @@ impl Auth {
         self.seat_poll.set(seat_poll);
     }
 
+    #[cfg(test)]
+    fn set_cooldown(&self, cooldown: Duration) {
+        self.cooldown.set(cooldown);
+    }
+
+    #[cfg(test)]
+    fn set_cooldown_check(&self, check: Duration) {
+        self.cooldown_check.set(check);
+    }
+
+    #[cfg(test)]
+    fn set_wait_out(&self, wait_out: Duration) {
+        self.wait_out.set(wait_out);
+    }
+
     /// Input that reaches nothing but the activity clock.
     #[cfg(test)]
     fn touch_activity_clock(&self) {
         self.last_activity.set(Instant::now());
     }
 
-    /// Ages the running conversation and the last activity, so tests reach
-    /// the re-arm guards without sleeping.
+    /// Ages the running conversation, the last activity and the last
+    /// restart, so tests reach the re-arm guards without sleeping.
     #[cfg(test)]
     fn backdate(&self, by: Duration) {
         if let Phase::Conversing { started, .. } = &mut *self.phase.borrow_mut() {
@@ -713,6 +1043,8 @@ impl Auth {
         }
         let activity = self.last_activity.get();
         self.last_activity.set(activity.checked_sub(by).unwrap_or(activity));
+        let restart = self.last_restart.get();
+        self.last_restart.set(restart.map(|at| at.checked_sub(by).unwrap_or(at)));
     }
 }
 
@@ -730,19 +1062,30 @@ mod tests {
     use crate::backend::scripted::{Gate, ScriptedBackend, Step};
     use crate::backend::DemoBackend;
     use greetd_ipc::AuthMessageType::{Info, Secret, Visible};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     thread_local! {
         static SHOWN: RefCell<String> = const { RefCell::new(String::new()) };
         static ON_SCREEN: Cell<bool> = const { Cell::new(true) };
+        static SLEPT: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     }
 
-    /// Whether the greeter's VT is the one on screen.
+    /// The boot clock with every suspend() so far in it.
+    fn slept_clock() -> Duration {
+        boot_clock() + SLEPT.with(Cell::get)
+    }
+
+    /// What a suspend this long does: the boot clock moves on, every GLib
+    /// timer and Instant stands still.
+    fn suspend(by: Duration) {
+        SLEPT.with(|slept| slept.set(slept.get() + by));
+    }
+
     fn on_screen(active: bool) {
         ON_SCREEN.with(|seat| seat.set(active));
     }
 
-    /// What the username entry shows.
     fn show(name: &str) {
         SHOWN.with(|shown| *shown.borrow_mut() = name.into());
     }
@@ -765,6 +1108,7 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
         show("edraven");
         on_screen(true);
+        SLEPT.with(|slept| slept.set(Duration::ZERO));
         let acquired = context.with_thread_default(|| {
             let bus = Rc::new(Bus::default());
             let sink = log.clone();
@@ -780,6 +1124,7 @@ mod tests {
                     UiEvent::Busy(busy) => format!("busy {busy}"),
                     UiEvent::SessionChanged(index) => format!("session {index}"),
                     UiEvent::Armed(armed) => format!("armed {armed}"),
+                    UiEvent::FingerprintLocked(locked) => format!("locked {locked}"),
                     UiEvent::Starting => "starting".into(),
                     UiEvent::Focus(target) => format!("focus {target:?}"),
                     UiEvent::UsernameChanged(name) => format!("username {name}"),
@@ -798,6 +1143,7 @@ mod tests {
                     seat_active: Box::new(|| ON_SCREEN.with(|seat| seat.get())),
                 },
             );
+            auth.clock.set(slept_clock);
             let pump = || {
                 for _ in 0..50 {
                     std::thread::sleep(Duration::from_millis(1));
@@ -1003,12 +1349,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_username_is_rejected_before_ipc() {
-        let log = drive(|auth, pump| {
-            auth.begin(String::new(), "pw".into());
+    fn empty_username_is_rejected_before_ipc_and_takes_the_focus_after_the_error() {
+        let (backend, seen, _) = scripted(password_only);
+        let log = drive_with(backend, config::Auth::default(), |auth, pump| {
+            show("");
+            auth.submit("pw".into());
             pump();
         });
-        assert_eq!(log, ["autherror enter a username"]);
+        assert!(requests(&seen).is_empty(), "{:?}", requests(&seen));
+        assert_eq!(log, ["autherror enter a username", "focus Username"]);
     }
 
     #[test]
@@ -1070,6 +1419,21 @@ mod tests {
         assert_eq!(armed, ["armed true", "armed false", "armed true", "armed false"], "{log:?}");
         let parked = log.iter().position(|e| e.starts_with("prompt")).unwrap();
         assert_eq!(log[parked - 2], "armed false", "{log:?}");
+    }
+
+    #[test]
+    fn the_journal_names_what_a_login_answered_not_a_module_it_cannot_see() {
+        for (secret, visible, info, how) in [
+            (true, false, true, "a password prompt answered"),
+            (true, true, false, "a password prompt answered"),
+            (false, true, false, "only a visible prompt answered"),
+            // A touch, or a scan that timed out and then nullok.
+            (false, false, true, "no prompt answered, after PAM info such as pam_fprintd's"),
+            // nullok and a blank password: pam_unix asks nothing.
+            (false, false, false, "no prompt answered and no PAM info"),
+        ] {
+            assert_eq!(login_path(secret, visible, info), how);
+        }
     }
 
     #[test]
@@ -1171,6 +1535,29 @@ mod tests {
         assert_eq!(seen, expected);
     }
 
+    /// pam_fprintd times out, then a module asks something visible.
+    fn fprint_then_token(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(Info, "Verification timed out"),
+            Step::Msg(Visible, "Token:"),
+        ]
+    }
+
+    #[test]
+    fn a_rearm_leaves_a_parked_visible_prompt_through_armed_alone() {
+        let (backend, seen, _) = scripted(fprint_then_token);
+        let log = drive_with(backend, eager(10), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+        });
+        let cycle = ["create edraven", "respond None", "respond None"];
+        assert_eq!(requests(&seen), [&cycle[..], &["cancel"], &cycle[..]].concat());
+        let token = log.iter().position(|event| event == "prompt[false,passive] Token:");
+        assert_eq!(log[token.expect("parked at the token") + 1], "armed true", "{log:?}");
+    }
+
     #[test]
     fn parked_outside_the_window_or_without_a_window_stays_parked() {
         let cycle = ["create edraven", "respond None", "respond None"];
@@ -1199,6 +1586,7 @@ mod tests {
         let (backend, seen, _) = scripted(password_only);
         drive_with(backend, eager(10), |auth, pump| {
             auth.set_retry(FAST, FAST * 4);
+            auth.set_wait_out(FAST);
             auth.start_eager("edraven");
             assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
             pump();
@@ -1212,6 +1600,7 @@ mod tests {
         let (backend, seen, _) = scripted(password_only);
         drive_with(backend, eager_always(), |auth, pump| {
             auth.set_retry(FAST, FAST * 2);
+            auth.set_wait_out(FAST);
             auth.start_eager("edraven");
             assert!(pump_until(pump, || creates(&seen) >= 8), "{:?}", requests(&seen));
         });
@@ -1342,6 +1731,7 @@ mod tests {
         let (backend, seen, _) = scripted(password_only);
         drive_with(backend, eager(10), |auth, pump| {
             auth.set_retry(FAST, FAST);
+            auth.set_wait_out(FAST);
             auth.start_eager("edraven");
             assert!(pump_until(pump, || creates(&seen) == 1 + RETRY_LIMIT as usize));
             pump();
@@ -1672,6 +2062,35 @@ mod tests {
     }
 
     #[test]
+    fn the_greeters_own_texts_and_a_failure_on_its_own_have_the_kinds_documented() {
+        let texts = || {
+            rules(
+                "[[rewrite]]\nmatch = \"too many\"\ntext = \"locked\"\nkind = \"error\"\n\
+                 [[rewrite]]\nmatch = \"nologin\"\ntext = \"closed\"\nkind = \"error\"\n\
+                 [[rewrite]]\nmatch = \"username\"\ntext = \"who?\"\nkind = \"failure\"\n",
+            )
+        };
+        let (backend, _, _) = scripted(three_no_matches);
+        let log = drive_texts(backend, capped(1), texts(), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        assert!(log.contains(&"pamerror locked".to_string()), "{log:?}");
+        let (backend, _, _) = scripted(|_| vec![Step::Fail("nologin")]);
+        let log = drive_texts(backend, eager(0), texts(), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        assert!(log.contains(&"pamerror closed".to_string()), "{log:?}");
+        let (backend, _, _) = scripted(password_only);
+        let log = drive_texts(backend, config::Auth::default(), texts(), |auth, pump| {
+            auth.begin(String::new(), "pw".into());
+            pump();
+        });
+        assert_eq!(log[0], "autherror who?", "{log:?}");
+    }
+
+    #[test]
     fn the_built_in_texts_come_from_config() {
         let texts = rules("enter-username = \"Wer bist du?\"\n");
         let log = drive_texts(
@@ -1683,7 +2102,7 @@ mod tests {
                 pump();
             },
         );
-        assert_eq!(log, ["autherror Wer bist du?"]);
+        assert_eq!(log, ["autherror Wer bist du?", "focus Username"]);
     }
 
     #[test]
@@ -1701,5 +2120,1061 @@ mod tests {
         assert_eq!(requests(&seen), ["create edraven"]);
         let parked = ["armed true", "armed false", "busy false", "prompt[true,passive] Password:"];
         assert_eq!(log, parked);
+    }
+
+    /// pam_fprintd ended its cycle without "Verification timed out": the
+    /// verify was cancelled at suspend ("Cannot run while suspended.") or
+    /// fprintd vanished — AUTHINFO_UNAVAIL either way, pam_unix asks next.
+    fn fprint_cut_short(_: &str) -> Vec<Step> {
+        vec![Step::Msg(Info, "Place your finger"), Step::Msg(Secret, "Password:")]
+    }
+
+    #[test]
+    fn a_cycle_cut_short_rearms_at_once() {
+        let seen = rearm_scenario(fprint_cut_short, eager_always(), Duration::from_secs(2));
+        let cycle = ["create edraven", "respond None"];
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn a_cycle_cut_short_within_a_second_waits_for_the_timer() {
+        let (backend, seen, _) = scripted(fprint_cut_short);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(Duration::from_millis(300), Duration::from_millis(300));
+            auth.start_eager("edraven");
+            pump();
+            assert_eq!(requests(&seen), ["create edraven", "respond None"]);
+            assert_eq!(auth.quick_ends.get(), 1);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+        });
+    }
+
+    static STUCK_CONVERSATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    /// After a suspend the first cycle is cut short and every later Claim
+    /// fails ("The device has already been opened!"): pam_fprintd returns
+    /// at once and pam_unix asks immediately.
+    fn suspended_then_stuck(_: &str) -> Vec<Step> {
+        if STUCK_CONVERSATIONS.fetch_add(1, Ordering::SeqCst) == 0 {
+            fprint_cut_short("")
+        } else {
+            password_only("")
+        }
+    }
+
+    const HOLD: Duration = Duration::from_millis(600);
+
+    /// Pumps for a while, checking that nothing opens meanwhile.
+    fn nothing_opens_for(pump: &dyn Fn(), seen: &Seen, wait: Duration) {
+        let (since, opened) = (Instant::now(), creates(seen));
+        while since.elapsed() < wait {
+            pump();
+            assert_eq!(creates(seen), opened, "{:?}", requests(seen));
+        }
+    }
+
+    #[test]
+    fn a_wedged_reader_is_waited_out_and_retried() {
+        // Every retry of a stuck reader comes within 6 s and would keep
+        // fprintd, which exits 30 s after its last client, alive for good.
+        drive_with(Box::new(DemoBackend::new()), eager_always(), |auth, _| {
+            let real: Vec<_> = (0..40).map(|n| auth.retry_delay(n, false)).collect();
+            assert!(real.iter().all(|d| *d <= Duration::from_secs(6)), "{real:?}");
+        });
+        assert!(WAIT_OUT > Duration::from_secs(30));
+        STUCK_CONVERSATIONS.store(0, Ordering::SeqCst);
+        let (backend, seen, _) = scripted(suspended_then_stuck);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            // The lid closed a while into the scan.
+            auth.backdate(Duration::from_secs(2));
+            // The cut-short cycle, then three parks at once.
+            assert!(pump_until(pump, || creates(&seen) == 4), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, HOLD / 2);
+            assert_eq!(auth.instant_parks.borrow().1, 0, "the next hold takes three more");
+            assert!(pump_until(pump, || creates(&seen) == 7), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, HOLD / 2);
+        });
+        assert_eq!(log.iter().filter(|e| e.starts_with("info Place")).count(), 1, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+    }
+
+    #[test]
+    fn three_instant_parks_hold_every_passive_open_then_retry() {
+        let (backend, seen, _) = scripted(password_only);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            auth.backdate(RESTART_COOLDOWN);
+            auth.note_activity();
+            nothing_opens_for(pump, &seen, HOLD / 2);
+            // Retried after it, and held again after three more.
+            assert!(pump_until(pump, || creates(&seen) == 6), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, HOLD / 2);
+        });
+        let quiet = |e: &String| !e.starts_with("locked") && !e.starts_with("pamerror");
+        assert!(log.iter().all(quiet), "{log:?}");
+    }
+
+    #[test]
+    fn a_username_edit_during_the_wait_out_opens_after_it() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            show("bob");
+            auth.start_eager("bob");
+            nothing_opens_for(pump, &seen, HOLD / 2);
+            assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
+        });
+        let three = ["create edraven", "cancel", "create edraven", "cancel", "create edraven"];
+        let expected = [&three[..], &["cancel", "create bob"]].concat();
+        assert_eq!(requests(&seen)[..expected.len()], expected);
+    }
+
+    #[test]
+    fn the_wait_out_refuses_no_login() {
+        let (backend, seen, gate) = scripted(|user| match user {
+            "touchy" => vec![Step::Msg(Info, "Place your finger"), Step::Wait],
+            _ => password_only(user),
+        });
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            show("touchy");
+            auth.start_eager("touchy");
+            auth.submit("pw".into());
+            pump();
+            gate.release();
+            pump();
+        });
+        let requests = requests(&seen);
+        let ends = ["cancel", "create touchy", "respond None", "start true"];
+        assert_eq!(requests[requests.len() - ends.len()..], ends);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked") || e == LOCKED), "{log:?}");
+    }
+
+    static RUN_BROKEN_BY_A_SCAN: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_fingerprint_wait_ends_a_run_of_instant_parks_and_input_does_not() {
+        RUN_BROKEN_BY_A_SCAN.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) =
+            scripted(|user| match RUN_BROKEN_BY_A_SCAN.fetch_add(1, Ordering::SeqCst) {
+                2 => fprint_gated(user),
+                _ => password_only(user),
+            });
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(Duration::from_secs(60));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            pump();
+            auth.backdate(Duration::from_secs(2));
+            gate.release();
+            assert!(pump_until(pump, || creates(&seen) == 6), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+
+        let (backend, seen, gate) = scripted(|_| vec![Step::Wait, Step::Msg(Secret, "Password:")]);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(Duration::from_secs(60));
+            auth.start_eager("edraven");
+            for conversation in 1..=3 {
+                let opened = pump_until(pump, || creates(&seen) == conversation);
+                assert!(opened, "{:?}", requests(&seen));
+                auth.backdate(RESTART_COOLDOWN);
+                auth.note_activity();
+                gate.release();
+            }
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+    }
+
+    #[test]
+    fn names_typed_on_the_way_to_a_username_start_no_wait_out() {
+        let (backend, seen, _) = scripted(|user| match user {
+            "edraven" => fprint(user),
+            _ => password_only(user),
+        });
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(Duration::from_secs(60), Duration::from_secs(60));
+            for typed in ["e", "ed", "edr", "edra", "edraven"] {
+                show(typed);
+                auth.start_eager(typed);
+                pump();
+            }
+            assert!(!auth.waiting_out.get());
+        });
+        let partials = ["create e", "cancel", "create ed", "cancel", "create edr", "cancel"];
+        let expected = [&partials[..], &["create edra", "cancel", "create edraven"]].concat();
+        assert_eq!(requests(&seen)[..expected.len()], expected);
+    }
+
+    /// pam_fprintd fails at once (a wedged reader), pam_faillock's preauth
+    /// tells of a locked account (two PAM_TEXT_INFO, pam_faillock 1.7.3),
+    /// pam_unix asks.
+    fn faillock_notice(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "The account is locked due to 3 failed logins."),
+            Step::Msg(Info, "(10 minutes left to unlock)"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn a_lock_notice_before_the_prompt_still_counts_as_a_park_at_once() {
+        let (backend, seen, _) = scripted(faillock_notice);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(Duration::from_secs(60));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+            assert!(auth.waiting_out.get());
+        });
+    }
+
+    #[test]
+    fn the_wait_out_holds_input_and_username_edits_under_a_window_too() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager(10), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.waiting_out.get()), "{:?}", requests(&seen));
+            assert_eq!(creates(&seen), 3);
+            auth.backdate(RESTART_COOLDOWN);
+            auth.note_activity();
+            nothing_opens_for(pump, &seen, HOLD / 4);
+            show("bob");
+            auth.start_eager("bob");
+            nothing_opens_for(pump, &seen, HOLD / 4);
+            assert!(pump_until(pump, || creates(&seen) > 3), "{:?}", requests(&seen));
+        });
+        assert_eq!(requests(&seen)[5..7], ["cancel", "create bob"]);
+    }
+
+    static CRASHES: AtomicUsize = AtomicUsize::new(0);
+
+    /// fprintd vanishes mid-verify; the D-Bus activation behind pam_fprintd's
+    /// Release brings a fresh one, so the next conversation arms normally.
+    fn crash_then_fresh(_: &str) -> Vec<Step> {
+        if CRASHES.fetch_add(1, Ordering::SeqCst) == 0 {
+            fprint_cut_short("")
+        } else {
+            vec![Step::Msg(Info, "Place your finger"), Step::Wait]
+        }
+    }
+
+    #[test]
+    fn an_fprintd_crash_rearms_and_the_next_touch_logs_in() {
+        CRASHES.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(crash_then_fresh);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            gate.release();
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "cancel",
+            "create edraven",
+            "respond None",
+            "start true",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    /// pam_fprintd's max-tries (3) no-matches end it with PAM_MAXTRIES,
+    /// which `sufficient` ignores: pam_unix asks next.
+    fn three_no_matches(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn no_match_errors_are_acked_and_max_tries_rearms_at_once() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(0), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+        });
+        let mut cycle = vec!["create edraven"];
+        cycle.extend(std::iter::repeat_n("respond None", 6));
+        let expected: Vec<&str> = [&cycle[..], &["cancel"], &cycle[..]].concat();
+        assert_eq!(requests(&seen), expected);
+        let errors = log.iter().filter(|e| e.starts_with("pamerror Failed")).count();
+        assert_eq!(errors, 6, "{log:?}");
+        // Still armed through the no-matches: the reader is waiting again.
+        let first_park = log.iter().position(|e| e.starts_with("prompt")).unwrap();
+        assert_eq!(log[..first_park].iter().filter(|e| *e == "armed false").count(), 1, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+    }
+
+    fn capped(misses: u32) -> config::Auth {
+        config::Auth { fingerprint_misses: misses, ..eager_always() }
+    }
+
+    const LOCKED: &str = "pamerror too many fingerprint attempts — use your password";
+    const MISS_SHOWN: &str = "pamerror Failed to match fingerprint";
+
+    fn count(log: &[String], entry: &str) -> usize {
+        log.iter().filter(|e| *e == entry).count()
+    }
+
+    fn positions(log: &[String], entry: &str) -> Vec<usize> {
+        (0..log.len()).filter(|&i| log[i] == entry).collect()
+    }
+
+    /// A conversation that ran pam_fprintd's three tries.
+    fn max_tries_cycle() -> Vec<&'static str> {
+        let mut cycle = vec!["create edraven"];
+        cycle.extend(std::iter::repeat_n("respond None", 6));
+        cycle
+    }
+
+    #[test]
+    fn the_default_cap_cools_down_at_the_end_of_the_third_max_tries_conversation() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            pump();
+            pump();
+        });
+        let cycle = max_tries_cycle();
+        let expected = [&cycle[..], &["cancel"], &cycle, &["cancel"], &cycle].concat();
+        assert_eq!(requests(&seen), expected);
+        let misses = positions(&log, MISS_SHOWN);
+        assert_eq!(misses.len(), 9, "{log:?}");
+        assert_eq!(log[misses[8] + 1], "locked true", "{log:?}");
+        assert_eq!(count(&log, "locked true"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn reaching_the_cap_cools_down_disarms_and_keeps_the_park() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            pump();
+        });
+        assert_eq!(requests(&seen), max_tries_cycle());
+        let expected = [
+            "armed true",
+            "info Place your finger",
+            MISS_SHOWN,
+            "info Place your finger",
+            MISS_SHOWN,
+            "locked true",
+            "armed false",
+            LOCKED,
+            "info Place your finger",
+            MISS_SHOWN,
+            "busy false",
+            "prompt[true,passive] Password:",
+            LOCKED,
+        ];
+        assert_eq!(log, expected);
+    }
+
+    #[test]
+    fn only_pam_fprintds_exact_no_match_counts_whatever_the_rewrite_rules_say() {
+        fn scans(_: &str) -> Vec<Step> {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Swipe was too short, try again"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(
+                    AuthMessageType::Error,
+                    "Your finger was not centered, try swiping your finger again",
+                ),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "An unknown error occurred"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint, try again"),
+                Step::Msg(Info, "Verification timed out"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ]
+        }
+        let one_conversation = |cap, texts| {
+            let (backend, seen, _) = scripted(scans);
+            let log = drive_texts(backend, capped(cap), texts, |auth, pump| {
+                auth.start_eager("edraven");
+                pump();
+            });
+            assert_eq!(creates(&seen), 1, "{:?}", requests(&seen));
+            log
+        };
+        let log = one_conversation(1, config::Texts::default());
+        assert_eq!(positions(&log, "locked true"), [positions(&log, MISS_SHOWN)[0] + 1]);
+        let log = one_conversation(2, config::Texts::default());
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+
+        // A retry dressed up as a miss counts for nothing, a dropped miss
+        // still counts.
+        let texts = rules(
+            "[[rewrite]]\nmatch = \"Swipe was too short\"\ntext = \"Failed to match fingerprint\"\n\
+             [[rewrite]]\nmatch = \"Failed to match fingerprint\"\ntext = \"\"\n",
+        );
+        let log = one_conversation(1, texts);
+        assert_eq!(count(&log, MISS_SHOWN), 1, "{log:?}");
+        let locked = log.iter().position(|e| e == "locked true").expect("cooled down");
+        assert_eq!(log[locked - 1], "info Verification timed out", "{log:?}");
+    }
+
+    #[test]
+    fn the_cooldown_holds_the_timer_and_input() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+            auth.note_activity();
+            pump();
+            auth.submit("fail".into());
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Fresh);
+            assert_eq!(auth.quick_ends.get(), 0, "no retry timer during a cool-down");
+            auth.note_activity();
+            pump();
+            pump();
+        });
+        let mut expected = max_tries_cycle();
+        expected.extend(["respond Some(\"fail\")", "cancel"]);
+        assert_eq!(requests(&seen), expected);
+        assert_eq!(log.last().map(String::as_str), Some("autherror wrong password"));
+        assert_eq!(count(&log, "armed true"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn the_cooldown_holds_username_edits() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            show("bob");
+            auth.start_eager("bob");
+            show("edraven");
+            auth.start_eager("edraven");
+            pump();
+            pump();
+        });
+        let mut expected = max_tries_cycle();
+        expected.push("cancel");
+        assert_eq!(requests(&seen), expected);
+        assert!(log.ends_with(&["info ".to_string(), LOCKED.to_string()]), "{log:?}");
+        assert_eq!(count(&log, "armed true"), 1, "{log:?}");
+    }
+
+    /// A no-match, then a touch that matches.
+    fn miss_then_touch(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Wait,
+        ]
+    }
+
+    #[test]
+    fn the_cooldown_holds_a_return_to_the_vt_too() {
+        let (backend, seen, gate) = scripted(miss_then_touch);
+        drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_pauses(TYPING_HOLD, FAST);
+            auth.start_eager("edraven");
+            pump();
+            on_screen(false);
+            gate.release();
+            pump();
+            on_screen(true);
+            pump();
+            pump();
+        });
+        let expected = ["create edraven", "respond None", "respond None", "respond None", "cancel"];
+        assert_eq!(requests(&seen), expected);
+    }
+
+    #[test]
+    fn a_parked_prompt_still_takes_a_password_during_a_cooldown() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            pump();
+        });
+        let requests = requests(&seen);
+        assert_eq!(requests[requests.len() - 2..], ["respond Some(\"pw\")", "start true"]);
+        assert_eq!(creates(&seen), 1);
+        assert!(log.contains(&"locked true".to_string()), "{log:?}");
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn a_login_without_a_password_is_refused_during_a_cooldown() {
+        let (backend, seen, gate) = scripted(miss_then_touch);
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Fresh);
+            auth.note_activity();
+            pump();
+        });
+        let expected = ["create edraven", "respond None", "respond None", "respond None", "cancel"];
+        assert_eq!(requests(&seen), expected);
+        assert_eq!(count(&log, LOCKED), 2, "{log:?}");
+        assert!(!log.iter().any(|e| e == "starting" || e.contains("would start")), "{log:?}");
+    }
+
+    static TYPED_DURING_A_TOUCH: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_password_typed_during_a_refused_touch_is_sent_again() {
+        TYPED_DURING_A_TOUCH.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(|user| {
+            if TYPED_DURING_A_TOUCH.fetch_add(1, Ordering::SeqCst) == 0 {
+                miss_then_touch(user)
+            } else {
+                password_only(user)
+            }
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            gate.release();
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond None",
+            "cancel",
+            "create edraven",
+            "respond Some(\"pw\")",
+            "start true",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert_eq!(count(&log, LOCKED), 2, "{log:?}");
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+        assert_eq!(count(&log, "busy false"), 1, "{log:?}");
+    }
+
+    static TYPED_AFTER_A_TOUCH: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_password_typed_during_a_cooldown_opens_a_conversation_and_logs_in() {
+        TYPED_AFTER_A_TOUCH.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(|user| {
+            if TYPED_AFTER_A_TOUCH.fetch_add(1, Ordering::SeqCst) == 0 {
+                miss_then_touch(user)
+            } else {
+                fprint(user)
+            }
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            pump();
+            auth.submit("pw".into());
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond None",
+            "cancel",
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond Some(\"pw\")",
+            "start true",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn a_refused_login_takes_the_password_into_one_new_conversation_only() {
+        let (backend, seen, gate) = scripted(miss_then_touch);
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            auth.submit("pw".into());
+            gate.release();
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            gate.release();
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Fresh));
+            auth.backdate(RESTART_COOLDOWN);
+            auth.note_activity();
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+        let touched = ["respond None", "respond None", "respond None", "cancel"];
+        let expected = [&["create edraven"], &touched[..], &["create edraven"], &touched].concat();
+        assert_eq!(requests(&seen), expected);
+        let refused = [String::from("busy false"), LOCKED.into()];
+        assert!(log.ends_with(&refused), "{log:?}");
+        assert_eq!(count(&log, "busy false"), 1, "{log:?}");
+        assert!(!log.iter().any(|e| e == "starting"), "{log:?}");
+    }
+
+    #[test]
+    fn a_login_no_scan_explains_is_refused_without_a_new_conversation() {
+        let (backend, seen, _) = scripted(|user| match user {
+            // Let in without being asked: pam_unix nullok and a blank password.
+            "blank" => vec![],
+            _ => vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ],
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            pump();
+            show("blank");
+            auth.start_eager("blank");
+            auth.submit("x".into());
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Fresh));
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+        let blank = requests(&seen).iter().filter(|r| *r == "create blank").count();
+        assert_eq!(blank, 1, "{:?}", requests(&seen));
+        let refused = [String::from("busy false"), LOCKED.into()];
+        assert!(log.ends_with(&refused), "{log:?}");
+    }
+
+    #[test]
+    fn misses_in_a_password_conversation_count_too() {
+        fn misses_then_asks(_: &str) -> Vec<Step> {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Secret, "Password:"),
+            ]
+        }
+        let (backend, seen, _) = scripted(misses_then_asks);
+        let classic = config::Auth { fingerprint_misses: 2, ..Default::default() };
+        let log = drive_with(backend, classic, |auth, pump| {
+            auth.begin("edraven".into(), "pw".into());
+            pump();
+        });
+        let misses = positions(&log, MISS_SHOWN);
+        assert_eq!(positions(&log, "locked true"), [misses[1] + 1], "{log:?}");
+        let requests = requests(&seen);
+        assert_eq!(requests[requests.len() - 2..], ["respond Some(\"pw\")", "start true"]);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn a_park_in_a_cooldown_shows_its_text_again() {
+        let (backend, _, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(3), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+        });
+        let at_cap = [MISS_SHOWN, "locked true", "armed false", LOCKED];
+        let parked = ["busy false", "prompt[true,passive] Password:", LOCKED];
+        let expected: Vec<String> =
+            [&at_cap[..], &parked].concat().into_iter().map(String::from).collect();
+        assert!(log.ends_with(&expected), "{log:?}");
+    }
+
+    #[test]
+    fn the_cooldown_lasts_fingerprint_cooldown() {
+        let cooldown = Duration::from_millis(400);
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_cooldown(cooldown);
+            let since = Instant::now();
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            assert!(since.elapsed() >= cooldown, "re-armed after {:?}", since.elapsed());
+        });
+        assert_eq!(count(&log, "locked false"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn the_cooldown_ends_and_the_park_rearms() {
+        let (backend, seen, _) = scripted(three_no_matches);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+            assert_eq!(creates(&seen), 1);
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+        });
+        let over = log.iter().position(|e| e == "locked false").expect("cool-down over");
+        assert_eq!(log[over + 1], "info ", "{log:?}");
+        assert_eq!(requests(&seen)[7], "cancel");
+    }
+
+    /// The cap reached, pam_fprintd gives up; a module asks something
+    /// visible, then the password.
+    fn miss_then_token(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Verification timed out"),
+            Step::Msg(Visible, "Token:"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn a_cooldown_neither_covers_nor_ends_a_parked_visible_prompt() {
+        let (backend, seen, _) = scripted(miss_then_token);
+        let options = config::Auth { fingerprint_misses: 1, ..eager(0) };
+        let log = drive_with(backend, options, |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+            assert!(auth.cooling());
+            assert!(pump_until(pump, || !auth.cooling()));
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+            auth.submit("123456".into());
+            pump();
+            auth.submit("pw".into());
+            pump();
+        });
+        let token = log.iter().position(|e| e == "prompt[false,passive] Token:").expect("parked");
+        let answered = token + log[token..].iter().position(|e| e == "busy true").unwrap();
+        assert_eq!(log[token + 1..answered], ["locked false"], "{log:?}");
+        let requests = requests(&seen);
+        let ends = ["respond Some(\"123456\")", "respond Some(\"pw\")", "start true"];
+        assert_eq!(requests[requests.len() - ends.len()..], ends);
+    }
+
+    #[test]
+    fn a_cooldown_ending_over_a_parked_prompt_tells_it_again() {
+        let (backend, _, _) = scripted(|_| {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Verification timed out"),
+                Step::Msg(Secret, "One-time password:"),
+            ]
+        });
+        let options = config::Auth { fingerprint_misses: 1, ..eager(0) };
+        let log = drive_with(backend, options, |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+            assert!(auth.cooling());
+            assert!(pump_until(pump, || !auth.cooling()));
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+        });
+        let parked = "prompt[true,passive] One-time password:";
+        let over = log.iter().position(|e| e == "locked false").expect("cool-down over");
+        assert_eq!(log[over - 2..over], [parked, LOCKED], "{log:?}");
+        assert_eq!(log[over..], ["locked false", "info ", parked], "{log:?}");
+    }
+
+    /// Under 0 what a hold kept back opens at the next input after it,
+    /// not as it ends.
+    fn opens_at_the_next_input_after(
+        auth: &Rc<Auth>,
+        pump: &dyn Fn(),
+        seen: &Seen,
+        over: impl Fn() -> bool,
+    ) {
+        let opened = creates(seen);
+        assert!(pump_until(pump, over), "{:?}", requests(seen));
+        pump();
+        assert_eq!(creates(seen), opened, "opened as the hold ended: {:?}", requests(seen));
+        auth.backdate(RESTART_COOLDOWN);
+        auth.note_activity();
+        pump();
+        assert_eq!(creates(seen), opened + 1, "{:?}", requests(seen));
+    }
+
+    fn last_opened(seen: &Seen) -> Option<String> {
+        requests(seen).into_iter().rfind(|r| r.starts_with("create"))
+    }
+
+    #[test]
+    fn under_0_what_a_cooldown_held_opens_at_the_next_input() {
+        for edit in [false, true] {
+            let (backend, seen, _) = scripted(three_no_matches);
+            let options = config::Auth { fingerprint_misses: 2, ..eager(0) };
+            drive_with(backend, options, |auth, pump| {
+                auth.set_cooldown(Duration::from_millis(300));
+                auth.start_eager("edraven");
+                assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+                assert!(auth.cooling());
+                if edit {
+                    show("bob");
+                    auth.start_eager("bob");
+                } else {
+                    auth.submit("fail".into());
+                }
+                pump();
+                opens_at_the_next_input_after(auth, pump, &seen, || !auth.cooling());
+            });
+            let expected = if edit { "create bob" } else { "create edraven" };
+            assert_eq!(last_opened(&seen).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn under_0_what_a_wait_out_held_opens_at_the_next_input() {
+        for edit in [false, true] {
+            let (backend, seen, _) = scripted(password_only);
+            drive_with(backend, eager(0), |auth, pump| {
+                // Failed logins of a user without prints: parks at once.
+                auth.set_wait_out(HOLD);
+                auth.start_eager("edraven");
+                pump();
+                for _ in 1..INSTANT_PARKS {
+                    auth.submit("fail".into());
+                    pump();
+                    auth.backdate(RESTART_COOLDOWN);
+                    auth.note_activity();
+                    pump();
+                }
+                assert!(auth.waiting_out.get(), "{:?}", requests(&seen));
+                if edit {
+                    show("bob");
+                    auth.start_eager("bob");
+                } else {
+                    auth.submit("fail".into());
+                }
+                pump();
+                opens_at_the_next_input_after(auth, pump, &seen, || !auth.waiting_out.get());
+            });
+            let expected = if edit { "create bob" } else { "create edraven" };
+            assert_eq!(last_opened(&seen).as_deref(), Some(expected));
+        }
+    }
+
+    static ENDED_BEFORE_THE_END: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn the_cooldown_ends_and_an_ended_conversation_reopens() {
+        ENDED_BEFORE_THE_END.store(0, Ordering::SeqCst);
+        let (backend, seen, gate) = scripted(|user| {
+            if ENDED_BEFORE_THE_END.fetch_add(1, Ordering::SeqCst) == 0 {
+                miss_then_touch(user)
+            } else {
+                password_only(user)
+            }
+        });
+        let log = drive_with(backend, capped(1), |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            assert!(pump_until(pump, || creates(&seen) == 2), "{:?}", requests(&seen));
+            pump();
+        });
+        let expected = [
+            "create edraven",
+            "respond None",
+            "respond None",
+            "respond None",
+            "cancel",
+            "create edraven",
+        ];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.ends_with(&["prompt[true,passive] Password:".to_string()]), "{log:?}");
+    }
+
+    /// The first scan waits for the gate and misses, the next times out.
+    fn one_miss(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Wait,
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(Info, "Verification timed out"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn misses_add_up_across_conversations_and_input() {
+        let (backend, seen, gate) = scripted(one_miss);
+        let log = drive_with(backend, capped(3), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            for conversation in 1..=3 {
+                let opened = pump_until(pump, || creates(&seen) == conversation);
+                assert!(opened, "{:?}", requests(&seen));
+                auth.note_activity();
+                assert_eq!(auth.quick_ends.get(), 0);
+                gate.release();
+            }
+            pump();
+            pump();
+        });
+        assert_eq!(creates(&seen), 3, "{:?}", requests(&seen));
+        let misses = positions(&log, MISS_SHOWN);
+        assert_eq!(positions(&log, "locked true"), [misses[2] + 1], "{log:?}");
+    }
+
+    /// A miss, then one more once the gate is released.
+    fn two_misses_apart(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Place your finger"),
+            Step::Wait,
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn misses_older_than_the_cooldown_are_forgotten() {
+        let (backend, seen, gate) = scripted(two_misses_apart);
+        let log = drive_with(backend, capped(2), |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(200));
+            auth.start_eager("edraven");
+            pump();
+            let first = Instant::now();
+            while first.elapsed() < Duration::from_millis(300) {
+                pump();
+            }
+            gate.release();
+            pump();
+        });
+        assert_eq!(count(&log, MISS_SHOWN), 2, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+        assert_eq!(creates(&seen), 1, "{:?}", requests(&seen));
+    }
+
+    #[test]
+    fn a_suspend_ages_the_misses() {
+        let cooldown = Duration::from_secs(600);
+        for (asleep, locked) in [(cooldown - Duration::from_secs(1), true), (cooldown, false)] {
+            let (backend, _, gate) = scripted(two_misses_apart);
+            let log = drive_with(backend, capped(2), |auth, pump| {
+                auth.set_cooldown(cooldown);
+                auth.start_eager("edraven");
+                pump();
+                suspend(asleep);
+                gate.release();
+                pump();
+            });
+            assert_eq!(count(&log, MISS_SHOWN), 2, "{log:?}");
+            assert_eq!(log.contains(&"locked true".to_string()), locked, "{asleep:?}: {log:?}");
+        }
+    }
+
+    #[test]
+    fn a_suspend_counts_toward_the_cooldown() {
+        let (backend, _, _) = scripted(three_no_matches);
+        let options = config::Auth { fingerprint_misses: 2, ..eager(0) };
+        let log = drive_with(backend, options, |auth, pump| {
+            auth.set_cooldown(Duration::from_secs(600));
+            auth.set_cooldown_check(FAST);
+            auth.start_eager("edraven");
+            pump();
+            suspend(Duration::from_secs(599));
+            pump();
+            assert!(auth.cooling(), "a second of it is left");
+            suspend(Duration::from_secs(1));
+            assert!(pump_until(pump, || !auth.cooling()), "still cooling down");
+        });
+        assert_eq!(count(&log, "locked true"), 1, "{log:?}");
+        assert_eq!(count(&log, "locked false"), 1, "{log:?}");
+    }
+
+    #[test]
+    fn a_cooldown_of_any_length_is_waited_out_in_short_steps() {
+        let (backend, _, _) = scripted(three_no_matches);
+        drive_with(backend, capped(1), |auth, pump| {
+            auth.set_cooldown(Duration::from_secs(u64::MAX));
+            auth.start_eager("edraven");
+            pump();
+            assert!(auth.cooling());
+            assert_eq!(auth.cooldown_wait(), Some(COOLDOWN_CHECK));
+            suspend(Duration::from_secs(100 * 365 * 24 * 60 * 60));
+            pump();
+            assert!(auth.cooling());
+        });
+    }
+
+    #[test]
+    fn without_a_cap_misses_never_cool_down() {
+        let no_cooldown = config::Auth { fingerprint_cooldown: 0, ..capped(1) };
+        for options in [capped(0), no_cooldown] {
+            let (backend, seen, _) = scripted(three_no_matches);
+            let log = drive_with(backend, options, |auth, pump| {
+                auth.set_retry(FAST, FAST * 2);
+                auth.set_wait_out(FAST);
+                auth.start_eager("edraven");
+                assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
+            });
+            assert!(count(&log, MISS_SHOWN) >= 9, "{log:?}");
+            assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+        }
+    }
+
+    #[test]
+    fn a_no_match_then_a_match_starts_the_session() {
+        let (backend, seen, gate) = scripted(|_| {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Place your finger"),
+                Step::Wait,
+            ]
+        });
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.start_eager("edraven");
+            pump();
+            gate.release();
+            pump();
+        });
+        let expected =
+            ["create edraven", "respond None", "respond None", "respond None", "start true"];
+        assert_eq!(requests(&seen), expected);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
     }
 }

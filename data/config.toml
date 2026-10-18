@@ -1,19 +1,25 @@
 # hypred-greeter configuration. Every key is optional; this file documents
-# the defaults. Relative [paths] entries resolve against this file's
-# directory (/etc/greetd/hypred-greeter/). A broken config never blocks
-# login: problems fall back to defaults and show up in an on-screen banner.
+# the defaults. Relative paths ([paths], [background] image) resolve against
+# this file's directory (/etc/greetd/hypred-greeter/). A broken config never
+# blocks login: problems fall back to defaults and show up in an on-screen
+# banner.
 
 [paths]
 layout = "layout.toml"     # widget tree; missing file → built-in layout
 style = "style.css"        # GTK4 CSS; missing file → built-in style
 
 [background]
-# Default image for `background` widgets (they can override per-widget).
-# image = "/usr/share/hypred-greeter/background.png"
+# Default image for `background` widgets (they can override per-widget):
+# any image file, a relative path from this directory; unset, none.
+# image = "wallpaper.jpg"
 fit = "cover"              # cover | contain | fill | scale-down
 
 [gtk]
-# Unset keys leave the GTK defaults alone.
+# Unset keys leave the GTK defaults alone. `dark` is GTK's colour scheme:
+# the theme's dark or light variant, and (GTK 4.20+) what
+# @media (prefers-color-scheme: dark) in the stylesheet matches.
+# A blank slate is the theme "Empty": the stylesheet owns the whole look,
+# and GTK's own scheme stays light (the stylesheet's @media sees `dark`).
 # dark = true
 # theme = "adw-gtk3-dark"
 # icon-theme = "Papirus-Dark"
@@ -21,29 +27,45 @@ fit = "cover"              # cover | contain | fill | scale-down
 # font = "Cantarell 14"
 
 [auth]
-# Open the PAM conversation as soon as a username is known (the remembered
-# user at startup, or when the username entry settles) instead of at the
-# first password submit. With pam_fprintd ahead of the password modules this
-# arms the fingerprint reader the moment the greeter appears. Eager
-# conversations get cancelled (restarts, username changes) — carry the PAM
-# stack from README "Fingerprint" before enabling, or faillock counts each
-# cancel as a failed login.
+# Open the PAM conversation as soon as a username is known (the user shown
+# at startup, the username entry once it settles, a pick in a username
+# picker) instead of at the first password submit. With pam_fprintd ahead
+# of the password modules this arms the fingerprint reader the moment the
+# greeter appears. Eager conversations get cancelled (restarts, username
+# changes) — carry the PAM stack from README "Fingerprint" before enabling,
+# or faillock counts each cancel as a failed login.
 eager = false
 # When a conversation parked at the password prompt is restarted so the
-# reader re-arms (pam_fprintd gives up after its timeout; only a fresh
-# conversation arms it again): "always" — after every timed-out cycle, so a
-# touch logs in whenever you walk up; N — for N seconds after the last
-# input, then on the next input; 0 — never.
+# reader re-arms (pam_fprintd gives up after its timeout or max-tries; only
+# a fresh conversation arms it again): "always" — after every cycle that ran
+# out, so a touch logs in whenever you walk up; N — for N seconds after the
+# last input, then on the next input; 0 — never. Nothing re-arms during a
+# fingerprint cool-down (below) or the 31 s wait-out of a reader that never
+# gets to wait (README "Fingerprint").
 rearm-window = 0
 # The username shown when nothing is remembered yet (a layout without a
 # `username` widget needs one).
 # user = "edraven"
+# Always `user`, even over a remembered one: the username widget turns
+# read-only (a picker disabled). Without `user` it is ignored.
+fixed-user = false
 # Text left in the password entry keeps a parked prompt ready (no re-arm)
 # for this many seconds after the last input.
 typing-hold = 30
 # How long the username entry has to settle before an eager conversation
-# opens for the name typed.
+# opens for the name typed (a pick in a picker opens one at once).
 username-debounce-ms = 400
+# Fingerprint scans that fail to match (pam_fprintd's "Failed to match
+# fingerprint") within fingerprint-cooldown seconds, counted by this greeter
+# for every name typed into it, before a cool-down that long: the greeter
+# stops arming the reader on its own and refuses a login without a
+# password; a password still logs in. pam_fprintd's max-tries holds per
+# conversation only, every re-arm opens a fresh one, and faillock never
+# sees a scan. 9 = three conversations of max-tries 3; 0 = no cap.
+fingerprint-misses = 9
+# Seconds a miss is remembered and a cool-down lasts, a suspend included;
+# 0 = no cap.
+fingerprint-cooldown = 600
 
 [commands]
 # Any name = argv; a `button` runs one by name (action = "suspend"). reboot
@@ -52,13 +74,24 @@ reboot = ["systemctl", "reboot"]
 poweroff = ["systemctl", "poweroff"]
 # suspend = ["systemctl", "suspend"]
 
+[keys]
+# None by default. A key as GTK writes it → an action, named as a `button`
+# names it: cancel, next-session, prev-session, focus-username,
+# focus-password, or a [commands] name. Works whatever widget has the
+# focus, but not while a dropdown's list or a right-click menu is open; a
+# key an entry takes as input (a character, Enter, Tab, Backspace, Delete,
+# Escape) needs <Control>, <Alt> or <Super>. Held down, a key runs its
+# command once.
+# "<Control><Alt>Delete" = "reboot"
+# F2 = "next-session"
+
 [sessions]
 # Prepended to the Exec of X11 sessions (from xsessions/ dirs).
 x11-prefix = ["startx", "/usr/bin/env"]
 # Extra KEY=value pairs handed to greetd's start_session.
 # env = ["XCURSOR_SIZE=24"]
-# Preselected for a user with no session remembered yet (else the first by
-# name): "<wayland|x11>/<desktop file stem>".
+# Preselected for a user with no session remembered yet (else the first in
+# the list, after only/hide/names/order): "<wayland|x11>/<desktop file stem>".
 # default = "wayland/hyprland-uwsm"
 # Same ids: `only` keeps just these, `hide` drops these, `order` lists
 # these first (the rest follow by name). An id that matches nothing is
@@ -73,16 +106,29 @@ x11-suffix = " (X11)"
 # "wayland/hyprland-uwsm" = "Hyprland"
 
 [texts]
-# The greeter's own messages; {program} and {error} are filled in.
+# The greeter's own messages.
 enter-username = "enter a username"
 username-changed = "username changed — enter the password again"
+# When greetd's error has no text.
 auth-failed = "authentication failed"
+# A power, button or [keys] command that cannot start, or exits
+# unsuccessfully within 10 s; {program} and {error} ("exit status: 1", say)
+# are filled in. Not for a run less than 2 s after the last of the same
+# command.
 power-failed = "{program}: {error}"
+# Shown during a fingerprint cool-down ([auth] fingerprint-misses), and for
+# a login refused in one.
+fingerprint-locked = "too many fingerprint attempts — use your password"
 # Rewrite rules for everything shown — PAM info and errors, prompts,
 # failures: the first rule whose `match` is found in the text (a
 # substring; with `regex = true` a glib::Regex pattern, `\1` references
 # allowed in `text`) replaces it with `text`; "" drops the message; `kind`
-# (info | error | prompt | failure) limits a rule to one kind.
+# limits a rule to one kind: info (PAM's, --demo's notices), prompt, error
+# (PAM's errors, a conversation failing on its own, power-failed,
+# fingerprint-locked) or failure (the end of a conversation you submitted
+# to, enter-username, username-changed). Anchor a rule on the message it
+# is for: "Failed to match", not "fingerprint", which fingerprint-locked
+# has too.
 # [[texts.rewrite]]
 # match = "Place your"
 # text = "Touch the fingerprint reader"

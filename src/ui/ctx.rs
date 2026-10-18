@@ -4,10 +4,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use crate::actions::Runs;
 use crate::auth::Auth;
 use crate::config::Config;
 use crate::layout::{build, Node};
-use crate::ui::bus::{Bus, UiEvent};
+use crate::ui::bus::{Bus, FocusTarget, UiEvent};
 use crate::widgets::Registry;
 
 pub struct Shared {
@@ -16,6 +17,7 @@ pub struct Shared {
     pub selected_session: Cell<usize>,
     pub state: RefCell<crate::state::State>,
     default_session: Option<usize>,
+    clear_failed: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl Shared {
@@ -33,6 +35,7 @@ impl Shared {
             selected_session: Cell::new(0),
             state: RefCell::new(state),
             default_session,
+            clear_failed: RefCell::default(),
         };
         shared.selected_session.set(shared.preselected_session().unwrap_or(0));
         Rc::new(shared)
@@ -59,6 +62,7 @@ pub struct AppHandle {
     pub auth: Rc<Auth>,
     pub bus: Rc<Bus>,
     pub shared: Rc<Shared>,
+    pub runs: Rc<Runs>,
     username_debounce: Duration,
     edit_debounce: Rc<Cell<Option<glib::SourceId>>>,
 }
@@ -70,7 +74,8 @@ impl AppHandle {
         shared: Rc<Shared>,
         username_debounce: Duration,
     ) -> Self {
-        Self { auth, bus, shared, username_debounce, edit_debounce: Rc::default() }
+        let (runs, edit_debounce) = (Rc::default(), Rc::default());
+        Self { auth, bus, shared, runs, username_debounce, edit_debounce }
     }
 
     pub fn username(&self) -> String {
@@ -85,7 +90,15 @@ impl AppHandle {
         }
     }
 
-    /// The selected session's display name; empty without sessions.
+    pub fn pick_user(&self, name: &str) {
+        if name == self.username() {
+            return;
+        }
+        self.set_username(name);
+        self.emit(&UiEvent::Focus(FocusTarget::Password));
+        self.auth.start_eager(name);
+    }
+
     pub fn session_name(&self) -> String {
         self.shared.selected().map(|s| s.name.clone()).unwrap_or_default()
     }
@@ -97,7 +110,6 @@ impl AppHandle {
         }
     }
 
-    /// The next (+1) or previous (-1) session, wrapping around.
     pub fn step_session(&self, step: isize) {
         let count = self.shared.sessions.len();
         if count > 0 {
@@ -137,6 +149,41 @@ impl AppHandle {
     pub fn emit(&self, event: &UiEvent) {
         self.auth.emit(event.clone());
     }
+
+    /// Ends the window's `.hg-failed` alone. An empty info would end it
+    /// too, but every widget takes that for a dropped conversation.
+    pub fn clear_failed(&self) {
+        let hook = self.shared.clear_failed.borrow().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    pub fn connect_clear_failed(&self, hook: impl Fn() + 'static) {
+        *self.shared.clear_failed.borrow_mut() = Some(Rc::new(hook));
+    }
+}
+
+/// How each `username` widget built takes the focus. A focus request goes
+/// to the first entry that takes it, else the first picker: each grabbing
+/// it would leave it with the one built last.
+#[derive(Default)]
+pub struct UsernameFocus(RefCell<Vec<(bool, Grab)>>);
+
+/// Grabs the focus for its widget; false where that widget cannot take it.
+type Grab = Box<dyn Fn() -> bool>;
+
+impl UsernameFocus {
+    pub fn add(&self, entry: bool, grab: impl Fn() -> bool + 'static) {
+        self.0.borrow_mut().push((entry, Box::new(grab)));
+    }
+
+    fn grab(&self) -> bool {
+        let takers = self.0.borrow();
+        let entries = takers.iter().filter(|(entry, _)| *entry);
+        let pickers = takers.iter().filter(|(entry, _)| !*entry);
+        entries.chain(pickers).any(|(_, grab)| grab())
+    }
 }
 
 pub struct BuildCtx<'a> {
@@ -146,7 +193,13 @@ pub struct BuildCtx<'a> {
     pub bus: Rc<Bus>,
     pub app: AppHandle,
     pub demo: bool,
+    pub check: bool,
+    pub username_focus: Rc<UsernameFocus>,
     problems: RefCell<Vec<String>>,
+    built: RefCell<std::collections::HashSet<String>>,
+    /// Label commands, started once their tree is the one shown: a layout
+    /// that falls back is built, and thrown away, first.
+    commands: RefCell<Vec<Box<dyn FnOnce()>>>,
 }
 
 impl<'a> BuildCtx<'a> {
@@ -156,9 +209,41 @@ impl<'a> BuildCtx<'a> {
         registry: &'a Registry,
         app: AppHandle,
         demo: bool,
+        check: bool,
     ) -> Self {
         let bus = app.bus.clone();
-        Self { config, base_dir, registry, bus, app, demo, problems: RefCell::new(Vec::new()) }
+        let username_focus = Rc::new(UsernameFocus::default());
+        let takers = username_focus.clone();
+        bus.subscribe(move |event| match event {
+            UiEvent::Focus(FocusTarget::Username) => {
+                takers.grab();
+            }
+            UiEvent::Focus(FocusTarget::Password)
+            | UiEvent::Prompt { .. }
+            | UiEvent::Info(_)
+            | UiEvent::PamError(_)
+            | UiEvent::AuthError(_)
+            | UiEvent::Busy(_)
+            | UiEvent::SessionChanged(_)
+            | UiEvent::Armed(_)
+            | UiEvent::FingerprintLocked(_)
+            | UiEvent::Starting
+            | UiEvent::UsernameChanged(_) => {}
+        });
+        let problems = RefCell::new(Vec::new());
+        Self {
+            config,
+            base_dir,
+            registry,
+            bus,
+            app,
+            demo,
+            check,
+            username_focus,
+            problems,
+            built: RefCell::default(),
+            commands: RefCell::default(),
+        }
     }
 
     pub fn resolve_path(&self, path: &std::path::Path) -> std::path::PathBuf {
@@ -181,13 +266,36 @@ impl<'a> BuildCtx<'a> {
     pub fn take_problems(&self) -> Vec<String> {
         self.problems.take()
     }
+
+    pub fn note_built(&self, kind: &str) {
+        self.built.borrow_mut().insert(kind.to_string());
+    }
+
+    pub fn built(&self, kind: &str) -> bool {
+        self.built.borrow().contains(kind)
+    }
+
+    pub fn defer_command(&self, start: impl FnOnce() + 'static) {
+        self.commands.borrow_mut().push(Box::new(start));
+    }
+
+    pub fn discard_commands(&self) {
+        self.commands.take();
+    }
+
+    pub fn start_commands(&self) {
+        for start in self.commands.take() {
+            start();
+        }
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sessions::{Kind, Session};
     use crate::state::State;
+    use std::path::Path;
 
     fn session(name: &str, stem: &str) -> Session {
         Session {
@@ -223,7 +331,15 @@ mod tests {
 
     /// Runs `scenario` with a handle over `shared` and returns the events
     /// it caused, on a context of its own like the auth tests.
-    fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+    pub(crate) fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+        events_with(shared, &crate::config::Auth::default(), scenario)
+    }
+
+    fn events_with(
+        shared: Rc<Shared>,
+        options: &crate::config::Auth,
+        scenario: impl FnOnce(&AppHandle),
+    ) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         let acquired = context.with_thread_default(|| {
@@ -240,7 +356,7 @@ mod tests {
                 Box::new(crate::backend::DemoBackend::new()),
                 bus.clone(),
                 true,
-                &crate::config::Auth::default(),
+                options,
                 &crate::config::Texts::default(),
                 crate::auth::Hooks {
                     current_username: Box::new(String::new),
@@ -253,7 +369,8 @@ mod tests {
         });
         acquired.expect("test context must be acquirable");
         std::mem::forget(context);
-        Rc::try_unwrap(log).unwrap().into_inner()
+        // A command still running holds a handle, and through its bus the log.
+        log.take()
     }
 
     #[test]
@@ -271,6 +388,55 @@ mod tests {
     }
 
     #[test]
+    fn the_fingerprint_lock_toggles_its_window_class() {
+        let changes = |locked| crate::ui::state_changes(&UiEvent::FingerprintLocked(locked));
+        assert_eq!(changes(true), [("hg-fingerprint-locked", true)]);
+        assert_eq!(changes(false), [("hg-fingerprint-locked", false)]);
+    }
+
+    #[test]
+    fn a_pick_moves_on_to_the_password_unless_its_name_is_shown() {
+        let mut state = State::default();
+        state.last_session.insert("touch".into(), "wayland/hyprland-uwsm".into());
+        let shared = Shared::new("fprint".into(), sessions(), state, None);
+        let log = events(shared, |app| {
+            app.pick_user("fprint");
+            app.pick_user("touch");
+            assert_eq!(app.username(), "touch");
+        });
+        assert_eq!(log, ["username touch", "session 1", "Focus(Password)"]);
+    }
+
+    #[test]
+    fn a_pick_opens_an_eager_conversation_for_the_name_picked() {
+        let shared = Shared::new("fprint".into(), sessions(), State::default(), None);
+        let eager = crate::config::Auth { eager: true, ..Default::default() };
+        let log = events_with(shared, &eager, |app| {
+            app.pick_user("fprint");
+            app.pick_user("touch");
+            let asked = Rc::new(Cell::new(false));
+            let flag = asked.clone();
+            app.bus
+                .subscribe(move |event| flag.set(flag.get() || matches!(event, UiEvent::Info(_))));
+            let context = glib::MainContext::ref_thread_default();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !asked.get() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+                while context.iteration(false) {}
+            }
+        });
+        assert_eq!(
+            log,
+            [
+                "username touch",
+                "Focus(Password)",
+                "Armed(true)",
+                "Info(\"Place your right thumb on the fingerprint reader\")",
+            ]
+        );
+    }
+
+    #[test]
     fn a_username_edit_announces_itself_then_snaps_the_session() {
         let mut state = State::default();
         state.last_session.insert("bob".into(), "wayland/hyprland-uwsm".into());
@@ -280,5 +446,71 @@ mod tests {
             app.set_username("bob");
         });
         assert_eq!(log, ["username bo", "username bob", "session 1"]);
+    }
+
+    #[test]
+    fn the_username_focus_goes_to_one_widget_an_entry_first() {
+        let tried = Rc::new(RefCell::new(Vec::new()));
+        let focus = |takers: &[(&'static str, bool, bool)]| {
+            tried.borrow_mut().clear();
+            let order = UsernameFocus::default();
+            for &(name, entry, takes) in takers {
+                let tried = tried.clone();
+                order.add(entry, move || {
+                    tried.borrow_mut().push(name);
+                    takes
+                });
+            }
+            (order.grab(), tried.borrow().clone())
+        };
+        let (dropdown, buttons) = (("dropdown", false, true), ("buttons", false, true));
+        let (entry, unrooted) = (("entry", true, true), ("unrooted entry", true, false));
+        assert_eq!(
+            focus(&[dropdown, unrooted, entry, buttons]),
+            (true, vec!["unrooted entry", "entry"])
+        );
+        assert_eq!(focus(&[entry, dropdown]), (true, vec!["entry"]));
+        assert_eq!(
+            focus(&[unrooted, buttons, dropdown]),
+            (true, vec!["unrooted entry", "buttons"])
+        );
+        assert_eq!(focus(&[unrooted]), (false, vec!["unrooted entry"]));
+        assert_eq!(focus(&[]), (false, vec![]));
+    }
+
+    #[test]
+    fn commands_start_for_the_tree_shown_only() {
+        let shared = Shared::new(String::new(), sessions(), State::default(), None);
+        events(shared, |app| {
+            let (config, registry) = (Config::default(), Registry::builtin());
+            let ctx = BuildCtx::new(&config, Path::new("/"), &registry, app.clone(), false, false);
+            let ran = Rc::new(RefCell::new(Vec::new()));
+            let run = |name| {
+                let ran = ran.clone();
+                move || ran.borrow_mut().push(name)
+            };
+            ctx.defer_command(run("thrown away"));
+            ctx.discard_commands();
+            ctx.defer_command(run("shown"));
+            assert!(ran.borrow().is_empty(), "nothing starts while a tree is built");
+            ctx.start_commands();
+            ctx.start_commands();
+            assert_eq!(*ran.borrow(), ["shown"]);
+        });
+    }
+
+    #[test]
+    fn clearing_the_failed_state_tells_no_widget() {
+        let shared = Shared::new(String::new(), sessions(), State::default(), None);
+        let cleared = Rc::new(Cell::new(0));
+        let count = cleared.clone();
+        let log = events(shared, move |app| {
+            app.clear_failed();
+            app.connect_clear_failed(move || count.set(count.get() + 1));
+            app.clear_failed();
+            app.clone().clear_failed();
+        });
+        assert!(log.is_empty(), "{log:?}");
+        assert_eq!(cleared.get(), 2);
     }
 }

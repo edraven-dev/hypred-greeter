@@ -34,15 +34,17 @@ pub fn load(path: &Path, require_auth: bool, known_user: bool) -> Loaded {
             }
         });
 
-    let root = root.unwrap_or_else(|| {
-        let mut default_problems = Vec::new();
-        let root = parse_str(DEFAULT_LAYOUT, &mut default_problems)
-            .expect("embedded default layout must parse (covered by unit test)");
-        assert!(default_problems.is_empty(), "embedded default layout: {default_problems:?}");
-        root
-    });
+    let root = root.unwrap_or_else(builtin);
 
     Loaded { root, problems }
+}
+
+pub fn builtin() -> Node {
+    let mut problems = Vec::new();
+    let root = parse_str(DEFAULT_LAYOUT, &mut problems)
+        .expect("embedded default layout must parse (covered by unit test)");
+    assert!(problems.is_empty(), "embedded default layout: {problems:?}");
+    root
 }
 
 pub fn parse_str(text: &str, problems: &mut Vec<String>) -> Option<Node> {
@@ -218,11 +220,23 @@ fn login_possible(root: &Node, require_auth: bool, known_user: bool) -> Result<(
     }
 }
 
+/// After the build: a widget the tree names may still be missing, a ⚠
+/// placeholder (a bad property) or never built (a parent that failed or is
+/// no container).
+pub fn login_built(password: bool, username: bool, known_user: bool) -> Result<(), &'static str> {
+    if !password {
+        Err("the `password` widget failed to build")
+    } else if !username && !known_user {
+        Err("the `username` widget was not built and no user is known")
+    } else {
+        Ok(())
+    }
+}
+
 pub fn contains_kind(node: &Node, kind: &str) -> bool {
     any(node, &|node| node.kind == kind)
 }
 
-/// Some widget asked for the initial focus with `focus = true`.
 pub fn requests_focus(node: &Node) -> bool {
     any(node, &|node| node.common.focus == Some(true))
 }
@@ -256,6 +270,17 @@ mod tests {
         let text = "[root]\nwidget = \"username\"\n";
         let root = parse_str(text, &mut problems).unwrap();
         assert_eq!(login_possible(&root, true, true), Err("layout has no `password` widget"));
+    }
+
+    #[test]
+    fn a_login_needs_a_built_password_and_a_built_username_or_a_known_user() {
+        assert_eq!(login_built(true, true, false), Ok(()));
+        assert_eq!(login_built(true, false, true), Ok(()));
+        let password = Err("the `password` widget failed to build");
+        assert_eq!(login_built(false, true, true), password);
+        assert_eq!(login_built(false, false, false), password);
+        let username = Err("the `username` widget was not built and no user is known");
+        assert_eq!(login_built(true, false, false), username);
     }
 
     #[test]

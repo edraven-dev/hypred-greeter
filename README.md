@@ -7,7 +7,7 @@ is no button you cannot move, restyle, or delete, and none of it needs a
 recompile.
 
 - **Rust + GTK4, small on purpose**: no async runtime, no UI framework on
-  top, ~150 crates, minutes to build from source.
+  top, 79 crates of dependencies, minutes to build from source.
 - **Widget/addon architecture**: each widget kind is a small `WidgetDef`
   implementation behind a registry; adding one (a profile menu, a battery
   readout) is a new file plus one registration line.
@@ -16,15 +16,17 @@ recompile.
   Login always works.
 - **Demo mode**: `hypred-greeter --demo` runs windowed in your session with
   fake auth — iterate on layout and CSS without ever leaving your desktop.
+  It shows a layout as it is, even one that leaves no way to log in;
+  `--check` judges a layout the way the login screen does.
 
 ## Install
 
-Not on the AUR yet — build with `makepkg` straight from a clone:
+Not on the AUR — build with `makepkg` straight from a clone:
 
 ```sh
 git clone https://github.com/edraven-dev/hypred-greeter.git
 cd hypred-greeter/pkg
-makepkg -si -p PKGBUILD-git   # or PKGBUILD to build the pinned v0.3.0 release
+makepkg -si -p PKGBUILD-git   # or PKGBUILD for the release it pins
 ```
 
 Point greetd at it in `/etc/greetd/config.toml`. Under
@@ -40,32 +42,80 @@ or inside a dedicated Hyprland config, run `hypred-greeter` from the
 compositor and tear the compositor down when it exits (greetd starts the
 chosen session only after the greeter command exits).
 
+Either way its log is in the journal: `journalctl -t hypred-greeter`. The
+greeter writes stderr, and when that is not the journal already — a
+compositor's `exec` hands it `/dev/null`, greetd a VT — it sends each line,
+GTK's warnings included, to journald itself (`--demo` and `--check` write
+stderr only).
+
 ## Configuration
 
 Everything lives in `/etc/greetd/hypred-greeter/` (override with
 `--config`): `config.toml`, `layout.toml`, `style.css`. All three ship
 documented defaults. Relative paths in `[paths]` resolve against the config
-directory; `--layout` and `--style` override for quick iteration:
+directory; `--layout` and `--style` override them for quick iteration, a
+relative one from the current directory:
 
 ```sh
 hypred-greeter --demo --style ./mytheme.css --layout ./mylayout.toml
 ```
+
+`--check` loads all three as the greeter under greetd does on its first
+start — a layout that makes login impossible is swapped for the built-in
+one, where `--demo` keeps it — and builds the widgets, without a window,
+greetd or label commands. It prints every problem the banner would show to
+stderr, each CSS problem too where the banner counts those past the fifth,
+and exits 1 if there is one, 0 if not. It needs a display: run it from your
+desktop session before logging out onto a new config, stylesheet, layout or
+package. Three things differ from the login screen: the state file is left
+alone (only root and the greeter user may read it), so no user is
+remembered and a layout without a `username` widget passes only with
+`[auth] user`; sessions are looked up in your `XDG_DATA_DIRS`, not the
+greeter user's; and it runs as you, reading files with your permissions
+and finding icons in your icon theme and directories. A picture,
+stylesheet or layout under your home passes here and fails at the login
+screen: keep them where the greeter user can read them
+(`/etc/greetd/hypred-greeter`, `/usr/share`), and when the layout names
+theme icons, set `[gtk] icon-theme` to a theme installed system-wide.
 
 ### config.toml
 
 | section | keys | default |
 |---|---|---|
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
-| `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
-| `[gtk]` | `dark`, `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (`dark` is then off: GTK has no Empty-dark) | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `30`, `400` |
+| `[background]` | `image` (a path; a relative one from the config directory), `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
+| `[gtk]` | `dark` (GTK's colour scheme, dark or light: the theme's variant — its `gtk-dark.css` or its media queries — and, from GTK 4.20, what `@media (prefers-color-scheme: dark)` in the stylesheet matches), `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (GTK's scheme is then light, whatever `dark` or the desktop prefers: GTK has no Empty-dark and would load its Default theme in its place; the stylesheet's `@media (prefers-color-scheme: dark)` still matches with `dark = true`) | unset (GTK defaults) |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `fixed-user` (`true`: always `user`, even over a remembered one — the `username` widget turns read-only, a picker disabled; without `user` it is ignored and named in the banner), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens), `fingerprint-misses` (fingerprint scans that fail to match within `fingerprint-cooldown` seconds before a cool-down that long — see [Fingerprint](#fingerprint-pam_fprintd); `0`: no cap), `fingerprint-cooldown` (seconds a miss is remembered and a cool-down lasts, a suspend included; `0`: no cap) | `false`, `0`, unset, `false`, `30`, `400`, `9`, `600` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
-| `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
-| `[texts]` | `enter-username`, `username-changed`, `auth-failed` (when greetd's error has no text), `power-failed` (`{program}`, `{error}`); `[[texts.rewrite]]` entries — see below | the built-in English strings |
+| `[keys]` | a map: `"<accelerator>" = "action"` — a key as GTK writes it (`"<Control><Alt>Delete"`, `F2`, `"<Super>l"`) to an action as a `button` names it — see below | none |
+| `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, the first in the list (after `only`/`hide`/`names`/`order`), `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
+| `[texts]` | `enter-username`, `username-changed`, `auth-failed` (when greetd's error has no text), `power-failed` (a power, `button` or `[keys]` command that cannot start, or exits unsuccessfully within 10 s: `{program}`, `{error}` — e.g. `exit status: 1`; not for a run less than 2 s after the last of the same command), `fingerprint-locked` (shown during a fingerprint cool-down, and for a login refused in one); `[[texts.rewrite]]` entries — see below | the built-in English strings |
 
 A key the greeter does not know (a typo like `rearm_window`) keeps its
 default in force and is named in the on-screen banner. An id in
 `[sessions]` that matches no installed session is named there too.
+
+**Key bindings.** `[keys]` runs an action on a key, whatever widget has
+the focus — a built-in (`cancel`, `next-session`, `prev-session`,
+`focus-username`, `focus-password`) or a `[commands]` name, exactly as
+`button` takes it:
+
+```toml
+[keys]
+"<Control><Alt>Delete" = "reboot"
+F2 = "next-session"
+"<Shift>F2" = "prev-session"
+```
+
+A key an entry takes as input (a character, Enter, Tab, Backspace, Delete,
+Escape — on the keypad too) needs `<Control>`, `<Alt>` or `<Super>`. Such a
+key, one GTK cannot read, an unknown action and a key bound twice
+(`<Ctrl>r`, `<Control>r`: the first in the file wins) are named in the
+banner.
+A key acts at once (keys have no `confirm`); held down, it runs its command
+once, while `next-session` and `prev-session` keep stepping. An open
+dropdown list or right-click menu keeps the keys to itself: close it
+first. `--demo` announces a command instead of running it.
 
 **Rewriting texts.** Every text shown — PAM's info and error messages,
 prompts, the failure after a wrong password, the greeter's own — passes
@@ -84,10 +134,19 @@ regex = true                         # \1 references in text
 text = 'Your \1 \2, please'
 ```
 
-`error` is a PAM message mid-conversation, `failure` the error a
-conversation ends in (see "Two kinds of error" below). A dropped info or
-error is not shown at all; a dropped prompt or failure goes out with an
-empty text (the entry is still cleared and refocused).
+The kinds (see "Two kinds of error" below): `info` — PAM's info messages
+and `--demo`'s notices; `prompt` — PAM's prompts; `error` — PAM's error
+messages, a conversation that fails on its own (pam_nologin), and the
+greeter's `power-failed` and `fingerprint-locked` (a login refused in a
+cool-down included); `failure` — the error a conversation you submitted to
+ends in (greetd's text, or `auth-failed`), and the greeter's
+`enter-username` and `username-changed`. Anchor a rule on the message it
+is for: `match = "Failed to match"` rewrites pam_fprintd's miss alone,
+where `"fingerprint"` would rewrite `fingerprint-locked` too. A dropped
+info or error is not shown at all; a dropped prompt or failure goes out
+with an empty text: the prompt is still answered in the password entry
+(which, with `prompt-placeholder`, keeps its own placeholder), the failure
+still clears and refocuses it.
 
 ### layout.toml — the widget tree
 
@@ -103,11 +162,11 @@ widget = "background"
 [[root.children]]
 widget = "clock"
 format = "%A %e %B  %H:%M"
-anchor = "top"                # its offset: .hg-clock { margin-top: 48px } in style.css
+anchor = "top"                # its offset: .hg-clock { margin-top: 48px; } in style.css
 
 [[root.children]]
 widget = "box"
-name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px }
+name = "card"                 # style it as #card; row gap: #card { border-spacing: 12px; }
 orientation = "vertical"
 anchor = "center"
 
@@ -118,53 +177,56 @@ anchor = "center"
   widget = "password"
 ```
 
-**Common properties** (every widget): `name` (CSS `#name`), `class` (string
-or array, extra CSS classes), `halign`/`valign` (`start`/`center`/`end`/
-`fill`), `anchor` (sugar for both: `center`, `top`, `bottom-right`, ...),
-`hexpand`/`vexpand`, `margin` (int or `[top, right, bottom, left]`),
-`width`/`height` (pixels, or a share of the window such as `"26%"`; sizing
-from the stylesheet with the `--hg-vw` variables is the way meant for
-themes — see style.css below), `visible`, `focus` (takes the focus once
-shown; without it the username entry gets it when no user is known, else the
-password), `focusable = false` (skipped by Tab and clicks — for a widget that
-must not take the focus from the entries).
+**Common properties** (every widget): `name` (CSS `#name`; `hg-<kind>`),
+`class` (string or array, extra CSS classes), `halign`/`valign`
+(`start`/`center`/`end`/`fill`), `anchor` (sugar for both: `center`, `top`,
+`bottom-right`, ...), `hexpand`/`vexpand`, `margin` (int or `[top, right,
+bottom, left]`), `width`/`height` (pixels, or a share of the window such as
+`"26%"`; sizing from the stylesheet with the `--hg-vw` variables is the way
+meant for themes — see style.css below), `visible`, `focus` (takes the
+focus once shown; without it the `username` widget gets it when no user is
+known — of several, the first entry, else the first picker, as after
+"enter a username" and for `focus-username` — else the password),
+`focusable = false` (skipped by Tab and clicks — for a widget that must
+not take the focus from the entries). Unset, each is as GTK has it for
+that widget — `fill`, no margin, no size of its own, visible, focusable
+where it takes input — except that an `image` is centred.
 
 `spacing` and `margin` given in TOML are floors the stylesheet only adds to;
 prefer `border-spacing` and `margin` in style.css, where a theme can change
-them (the built-in layout sets none).
-
-**Upgrading from 0.2.** The built-in layout used to carry its gaps and
-offsets. A stylesheet kept from 0.2 next to the new layout.toml gets none of
-them; a layout.toml copied from 0.2 next to the new style.css gets them
-twice. Add to a custom stylesheet what the default one now has — `#card {
-border-spacing: 12px }`, `.hg-clock { margin-top: 48px }`, `.hg-power {
-margin: 0 24px 24px 0; border-spacing: 8px }` — and drop `spacing`/`margin`
-from a copied layout; the `power` widget's own `spacing` now defaults to 0.
+them (the built-in layout sets none; for a layout or stylesheet kept from
+0.2 see [Upgrading](#from-02)).
 
 **Widgets:**
 
 | widget | properties | notes |
 |---|---|---|
-| `box` | `orientation`, `spacing`, `homogeneous` | container |
+| `box` | `orientation` (`vertical`, where a GTK box is horizontal; or `horizontal`), `spacing` (0), `homogeneous` (`false`) | container |
 | `overlay` | — | container; children after the first float, placed by `anchor` |
-| `grid` | `row-spacing`, `column-spacing`; children take `col`, `row`, `col-span`, `row-span` | container |
-| `label` | `text`, `wrap`, `max-width-chars`, text properties, `command` (argv) + `interval` (seconds) | text with placeholders: `{user}` (the username entry), `{hostname}`, `{session}` (the selected session's name), `{time:%H:%M}` (strftime, ticks every second); `{{`/`}}` for a literal brace. With `command` the trimmed stdout is the text (placeholders apply to it too), run off the main thread once, or every `interval` seconds — in `--demo` too; a failing run leaves the previous text; braces in the output are plain text, and under `markup` the output is escaped. A wrapping label asks for its one-line width unless capped |
-| `button` | `label` and/or `icon` (a theme icon name or an absolute image path), `tooltip`, `action` or `command` (exactly one), `confirm` | `action`: a `[commands]` name, or built-in `cancel`, `next-session`, `prev-session`, `focus-username`, `focus-password`; `command = [argv]` runs that argv. Icon + label render as a box inside the button (icon first). `confirm = true`: the first click arms it (`.hg-button-confirm` for 3 s), the second runs it. Demo mode shows "demo: would run …" instead |
-| `image` | exactly one of `file` (a path; relative to the config dir), `icon` (theme icon name), `source = "avatar"`; `size` (pixels) | a picture. `avatar`: the current user's — `/var/lib/AccountsService/icons/<user>`, then `~<user>/.face`; re-read as the username changes; nothing readable (or anything but a regular file of at most 1 MiB and 4096 px a side) shows nothing. Without `size` a GtkImage shows at the stylesheet's `-gtk-icon-size` (16 px unless set); `size` is the box the picture fits in |
-| `background` | `image`, `fit` | wallpaper; defaults from `[background]` |
-| `clock` | `format` (strftime), text properties | ticks every second |
-| `username` | `placeholder`, `xalign` | prefilled with the last user (else `[auth] user`); Enter moves on to the password |
-| `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
-| `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
-| `session` | `style` (`dropdown`, `buttons`, `cycle`), for `buttons`: `orientation`, `spacing` | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
-| `power` | `reboot-label`, `poweroff-label`, `orientation`, `spacing` (0) | sugar: a box of two `button`s named `#hg-power-reboot` / `#hg-power-poweroff` with `action = "reboot"` / `"poweroff"` — build the same by hand for a third one |
+| `grid` | `row-spacing` (0), `column-spacing` (0); children take `col` (0), `row` (its place among the children, from 0), `col-span` (1), `row-span` (1) | container |
+| `label` | `text` (empty), `wrap` (`false`), `max-width-chars` (unset: no cap), text properties, `command` (argv; none) + `interval` (seconds; 0: one run) | text with placeholders: `{user}` (the username shown), `{hostname}`, `{session}` (the selected session's name), `{time:%H:%M}` (strftime, ticks every second); `{{`/`}}` for a literal brace. With `command` the trimmed stdout is the text (placeholders apply to it too), run off the main thread once, or every `interval` seconds — in `--demo` too; a failing run leaves the previous text; in the output only an exact placeholder is one, every other brace (`{{` and `}}` too) is plain text, and under `markup` the output is escaped. A wrapping label asks for its one-line width unless capped |
+| `button` | `label` and/or `icon` (a theme icon name or an absolute image path), `tooltip` (none), `action` or `command` (exactly one), `confirm` (`false`) | `action`: a `[commands]` name, or built-in `cancel`, `next-session`, `prev-session`, `focus-username`, `focus-password`; `command = [argv]` runs that argv. Icon + label render as a box inside the button (icon first). `confirm = true`: the first click arms it (`.hg-button-confirm` for 3 s), the second runs it. A command that cannot start, or exits unsuccessfully within 10 s of the click (a `systemctl reboot` logind refuses), shows `[texts] power-failed` like a PAM error — a half-typed password stays; a click less than 2 s after the last run of the same command reports nothing (logind refuses a second reboot while the first is under way). Demo mode shows "demo: would run …" instead |
+| `image` | exactly one of `file` (a path; relative to the config dir), `icon` (theme icon name), `source = "avatar"`; `size` (pixels; unset: the stylesheet's `-gtk-icon-size`) | a picture, contained in a square box and clipped to it; the widget is that box, centred where its parent has more room (unless `anchor` or `halign`/`valign` place it). `avatar`: the current user's — `/var/lib/AccountsService/icons/<user>`, then `~<user>/.face`; re-read as the username changes; a photo that is not square shows its centre square, so a round avatar has no bars; nothing readable, or anything but a PNG or JPEG file of at most 1 MiB and 4096 px a side, shows nothing. Size, rounding and cover are the stylesheet's, the way meant for themes: `-gtk-icon-size` sets the box (16 px unless set), `border-radius` rounds the picture, `-gtk-icon-transform: scale()` crops it to cover the box — see [What GTK CSS does not do](#what-gtk-css-does-not-do). `size` sets the box from the layout instead and overrides `-gtk-icon-size` |
+| `background` | `image` (`[background] image`: none), `fit` (`[background] fit`: `cover`) | wallpaper; a relative `image` path is from the config dir |
+| `clock` | `format` (strftime; `"%H:%M"`), text properties | ticks every second |
+| `username` | `style` (`entry`; or `dropdown`, `buttons`), for `entry`: `placeholder` (`"username"`), `xalign` (0); for `dropdown`/`buttons`: `users` (names; unset: the local users — a UID within /etc/login.defs' `UID_MIN`..`UID_MAX`, else 1000..60000, and a login shell listed in /etc/shells other than nologin/false); for `buttons`: `orientation` (`horizontal`), `spacing` (0) | prefilled with the last user (else `[auth] user`); Enter moves on to the password. `dropdown`/`buttons` offer `users` plus the user shown at startup; a pick moves on to the password and opens an eager conversation at once. `buttons`: a linked row of toggle buttons (`.hg-username-item`, the selected one `:checked`); the dropdown shows a name it does not list (none yet, or one typed into an entry) as an extra last row. Every `username` follows the others. No user to offer, an unknown `style` or a property it cannot use: a banner line, and an entry (without that property) where other widgets would show the ⚠ placeholder — login stays possible. `[auth] fixed-user`: read-only (a picker disabled), with `.hg-username-fixed` |
+| `password` | `placeholder` (`"password"`), `peek` (`true`: an eye icon that reveals what is typed), `prompt-placeholder` (`false`; `true`: a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder, unless a `[[texts.rewrite]]` rule dropped its text), `mask-visible` (`true`; `false`: what is typed into the empty entry at a visible prompt, such as an OTP, shows in clear until that prompt ends — at a secret prompt, a submission, a failed or dropped conversation, a re-arm — or the username is edited; a password typed before the prompt came stays masked, and text the peek icon revealed stays revealed), `invisible-char` (the one character the mask shows, such as `"*"`; unset, GTK's pick: the first of ● • ✱ ✺ the font has, else `*`), `xalign` (0) | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
+| `message` | `text` (empty), `max-width-chars` (30), `hide-empty` (`false`; `true`: hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500: how long an error stays before info may replace it), `error-clear-ms` (0: an error stays; else it goes after this long, and the window's `.hg-failed` with it, at the soonest 1.5 s after the failure — see [state classes](#state-classes)), `secret-prompts` (`hide`; `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties (`justify` is `center` here) | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
+| `session` | `style` (`dropdown`; or `buttons`, `cycle`), for `buttons`: `orientation` (`horizontal`), `spacing` (0) | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
+| `power` | `reboot-label` (`"Reboot"`), `poweroff-label` (`"Power Off"`), `orientation` (`horizontal`), `spacing` (0) | sugar: a box of two `button`s named `#hg-power-reboot` / `#hg-power-poweroff` with `action = "reboot"` / `"poweroff"` — build the same by hand for a third one |
 
-**Text properties** (`label`, `clock`, `message`): `xalign` (0.0 left … 1.0 right,
-within the space the widget gets), `justify` (`left`/`center`/`right`/`fill`,
-for wrapped lines), `ellipsize` (`none`/`start`/`middle`/`end`), `lines` (with
-`ellipsize`: at most that many lines), `markup` (the text is Pango markup:
-`format = "<b>%H</b>:%M"`; a text with a bare `&` or `<` fails to parse and
-is skipped, so leave it off `message`, which shows PAM's texts).
+**Text properties** (`label`, `clock`, `message`): `xalign` (0.0 left … 1.0
+right, within the space the widget gets; 0.5), `justify`
+(`left`/`center`/`right`/`fill`, for wrapped lines; `left`, on `message`
+`center`), `ellipsize` (`none`/`start`/`middle`/`end`; `none`), `lines`
+(with `ellipsize`: at most that many lines; unset: no limit), `markup`
+(`false`; `true`: the text is Pango markup — `format = "<b>%H</b>:%M"`,
+`&amp;` for a literal `&`; what a placeholder or a strftime conversion puts
+in is escaped, so `{time:%d & %m}` needs no `&amp;`. A label's `text` or a
+clock's `format` that is not valid markup is rejected: a ⚠ placeholder and
+a banner line. PAM's texts reach `message` later, and one that is not valid
+markup is not shown (the label keeps what it had), so leave `markup` off
+`message`).
 
 ### style.css — every selector you need
 
@@ -181,6 +243,9 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 | `.hg-background` | the wallpaper picture |
 | `.hg-clock` | the clock label |
 | `entry.hg-username` | username entry |
+| `dropdown.hg-username`, `dropdown.hg-username > button` | username picker (`style = "dropdown"`) |
+| `.hg-username .hg-username-item`, `… .hg-username-item:checked` | username picker buttons (`style = "buttons"`), the selected one |
+| `.hg-username.hg-username-fixed` | the username widget while `[auth] fixed-user` pins it (a picker is `:disabled` too) |
 | `entry.hg-password` | password entry (GtkPasswordEntry) |
 | `entry.hg-password.hg-password-busy` | … while a submitted password is on its way (read-only) |
 | `.hg-message`, `.hg-message.hg-message-error` | PAM messages / auth errors (also `-info`, `-prompt`, `-empty` — see state classes) |
@@ -195,8 +260,23 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 
 GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
+`@media (prefers-color-scheme: dark) { … }` (GTK 4.20 and later) follows
+`[gtk] dark` — or, while `dark` is unset and the theme is not Empty, the
+desktop's colour scheme — so one stylesheet can carry a light and a dark
+look. With `dark` unset, GTK 4.20–4.22 still take the theme's variant from
+the older `gtk-application-prefer-dark-theme` instead, so there the theme
+and the stylesheet can disagree; set `dark` to keep them in step.
+`(prefers-contrast: more)` (4.20) and `(prefers-reduced-motion: reduce)`
+(4.22) follow GTK's settings of the same names (`gtk-interface-contrast`,
+`gtk-interface-reduced-motion` in the greeter user's settings.ini), as
+GTK's own theme does.
 Parse errors are skipped, never fatal: each is logged and shown in the banner
-as `style.css:3:6: …` (the first five; the rest are counted).
+as `style.css:3:6: …` (the first five; the rest are counted). So are GTK's
+warnings about a block that is never used (an undefined `@media` feature) or
+a file that ends inside a block (a missing `}`). Warnings about what still
+works are only logged: deprecations (`@define-color`, `alpha()`; GTK reports
+them only with `GTK_DEBUG=css`), a block's last declaration without its `;`,
+an empty declaration (`;;`).
 
 **Sizes relative to the screen.** GTK CSS has no `%`/`vw` units for sizes,
 so the greeter publishes the window's size as custom properties on
@@ -205,17 +285,18 @@ the window's width and height, in px), `--hg-vmin`, `--hg-vmax`. Anything
 can be sized or spaced from them with `calc()`:
 
 ```css
-#card     { min-width: calc(var(--hg-vw) * 25 - 58px); }   /* a quarter of the screen */
+#card     { min-width: calc(var(--hg-vw) * 25 - 66px); }   /* a quarter of the screen */
 .hg-clock { margin-top: calc(var(--hg-vh) * 8); font-size: calc(var(--hg-vmin) * 4); }
 ```
 
-`min-width`/`min-height` are the content box: the card above subtracts its
-own padding (2 × 28 px) and border (2 × 1 px) to come out at exactly a
-quarter. Older greeters do not publish the variables; `var(--hg-vw, 18px)`
-keeps such a rule fixed at 18 px per unit instead of dropping it. The frame
-right after a resize is laid out with the previous values. (`width`/`height`
-in layout.toml take `"25%"` too, border-box, for layouts that would rather
-not touch CSS.)
+`min-width`/`min-height` are the content box: the shipped card (style.css)
+has 2 × 32 px of side padding and a 2 × 1 px border, so the rule above
+subtracts those 66 px to come out at exactly a quarter; a card with other
+padding subtracts its own. Older greeters do not publish the variables;
+`var(--hg-vw, 18px)` keeps such a rule fixed at 18 px per unit instead of
+dropping it. The frame right after a resize is laid out with the previous
+values. (`width`/`height` in layout.toml take `"25%"` too, border-box, for
+layouts that would rather not touch CSS.)
 
 ### State classes
 
@@ -226,10 +307,12 @@ message label:
 | class | while |
 |---|---|
 | `.hg-busy` | a submitted password is on its way |
-| `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm or submission; a failure while it is on drops it for a frame, so an `animation:` on it restarts on every failure |
+| `.hg-failed` | after an auth error or a PAM error message (or one of the greeter's own: a failed command, `fingerprint-locked`): for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
-| `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
-| `.hg-starting` | the session is being started (stays until the greeter exits) |
+| `.hg-prompt-visible` | a visible (non-secret) prompt is pending, such as an OTP's "Token:" — style its answer (`.hg-prompt-visible entry.hg-password { font-family: monospace; }`); off again at a secret prompt, a submission, an auth error, a re-arm, and when the conversation is dropped (a failed command's error leaves it on: the prompt still waits) |
+| `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in (never while `.hg-fingerprint-locked`) |
+| `.hg-fingerprint-locked` | a fingerprint cool-down: for `fingerprint-cooldown` seconds after too many misses nothing arms the reader on its own and a login without a password is refused — see [Fingerprint](#fingerprint-pam_fprintd) |
+| `.hg-starting` | the session is being started: under greetd until the greeter exits, a round trip later (too soon for a transition to show); in `--demo`, where nothing starts, until the next attempt (a submission, re-arm or prompt), so a theme can preview it; a failed start drops it |
 | `.hg-caps-lock` | Caps Lock is on |
 | `.hg-demo` | running with `--demo` |
 | `.hg-problems` | the banner is shown |
@@ -238,7 +321,7 @@ message label:
 ### Parts inside widgets
 
 GTK widgets are made of sub-nodes, addressable as descendants (verified on
-GTK 4.22):
+GTK 4.22 and 4.24):
 
 | selector | part |
 |---|---|
@@ -249,7 +332,15 @@ GTK 4.22):
 | `dropdown.hg-session > button`, `dropdown.hg-session > button arrow` | the picker's button and its arrow |
 | `dropdown.hg-session popover > contents` | the open list's frame |
 | `dropdown.hg-session popover listview > row` (+ `:selected`, `:hover`), `dropdown.hg-session popover listview > row image` | a list row; its checkmark |
-| `entry.hg-password:focus-within`, `*:focus-visible` | focus — draw the ring with `outline` and `outline-offset` |
+| `entry.hg-password:focus-within`, `button:focus-visible` | focus — draw the ring with `outline` and `outline-offset` |
+
+A `username` dropdown (`dropdown.hg-username`) has the same parts as the
+session one. GTK sets `:focus-within`, and after keyboard use
+`:focus-visible`, on every ancestor of the focused widget too:
+`*:focus-visible` rings the card and the window along with the button that
+has the focus. Scope a ring by the node that takes the focus —
+`button:focus-visible` for buttons and the pickers' buttons,
+`entry:focus-within` for entries (the `text` inside takes it).
 
 ### What GTK CSS does not do
 
@@ -258,8 +349,11 @@ GTK 4.22):
 | `width`, `height`, `max-width` | `min-width`/`min-height` (with `--hg-vw` for a share of the screen), `max-width-chars` on text widgets, `width`/`height` in layout.toml |
 | `%`, `vw`, `vh` units | `calc(var(--hg-vw) * 25)` |
 | `text-align` | `xalign`/`justify` on the widget in layout.toml |
+| a password's mask character | `invisible-char` on the `password` widget in layout.toml |
 | `display: none` | `visible = false` in layout.toml, `hide-empty` on the message; `opacity: 0` hides but keeps the space |
 | `cursor` | `[gtk] cursor-theme`; the pointer shape is the widget's |
+| `object-fit` | an `image` is contained in its box; `-gtk-icon-transform: scale(2)` on `.hg-image` crops a 2:1 picture to cover it (scale by the long side over the short one). A static file can also be the background of a named empty `box`: `#logo { background-image: url("logo.png"); background-size: cover; background-position: center; min-width: 128px; min-height: 128px; }` (to fit instead: `contain` and `background-repeat: no-repeat`; the url is relative to the stylesheet) |
+| `overflow` | none needed: an `image`, and a button's icon (`.hg-button image`), is clipped to its box, so `.hg-image { -gtk-icon-size: 128px; border-radius: 50%; }` is a round picture; an `-gtk-icon-shadow` shows only inside the box (give it `padding`) |
 | `:has()`, `:empty` | the state classes above (`.hg-info`, `.hg-message-empty`) |
 
 ## Writing a widget (addons)
@@ -289,13 +383,15 @@ possible later without breaking existing widgets.
   via the message widget. Try it: `--demo`, username `mfa` (visible OTP
   prompt + info), username `fprint` (a fingerprint cycle: two info messages
   around a 3 s blocking wait, then the password prompt), username `touch`
-  (the same cycle ending in a match), and password `fail` for the error
-  path.
+  (the same cycle ending in a match), username `miss` (three scans that
+  fail to match, then the password prompt), and password `fail` for the
+  error path.
 - **Two kinds of error**: a PAM error message mid-conversation ("Failed to
-  match fingerprint") is `PamError` — shown in red for at least 1.5 s
-  (`error-hold-ms`), the entry is left alone, the conversation goes on. Only a failed conversation
-  you submitted to (`AuthError`) clears and refocuses the password entry; one
-  that fails on its own (pam_nologin) is reported like a PAM error.
+  match fingerprint") is `PamError` — shown in red, and for 1.5 s
+  (`error-hold-ms`) no info replaces it; the entry is left alone, the
+  conversation goes on. Only a failed conversation you submitted to
+  (`AuthError`) clears and refocuses the password entry; one that fails on
+  its own (pam_nologin) is reported like a PAM error.
 - **State**: `/var/lib/hypred-greeter/state-vt<N>.toml` — one file per VT
   greetd runs the greeter on (`state.toml` without a VT), so a second greetd
   instance for a second user keeps its own memory — remembers the last user
@@ -308,36 +404,44 @@ possible later without breaking existing widgets.
   `NoDisplay=true` copy there hides the later ones, as XDG has it. What
   `[sessions] only`/`hide`/`order`/`names` make of the list is what every
   picker, `{session}` placeholder and the remembered-session lookup see.
-- **A layout without a `username` widget** is accepted only when a
-  username resolves (remembered, or `[auth] user`); otherwise the built-in
-  layout takes over, with a banner line saying why — like a layout without
-  a `password` widget.
+- **A layout must allow a login.** One without a `password` widget, or
+  whose `password` widget is not built (a bad property, or a parent that
+  fails to build or is no container), is replaced by the built-in layout,
+  with a banner line saying why; so is one without a `username` widget, or
+  whose `username` widget is not built (a parent that fails to build or is
+  no container), unless a username resolves (remembered, or
+  `[auth] user`). `--demo` skips this guard and shows the layout as it is;
+  `--check` applies it, as the login screen does.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
-  transport failure, `101` panic.
+  transport failure, `101` panic; with `--check`, `0` nothing to report and
+  `1` problems, or no check at all (no display, a bad argument: stderr says
+  which).
 
 ## Fingerprint (pam_fprintd)
 
 With `pam_fprintd.so` ahead of the password modules in `/etc/pam.d/greetd`,
 `[auth] eager = true` opens the PAM conversation as soon as a username is
-known — the remembered user at startup, or the username entry once typing
-settles (`username-debounce-ms`, 400 ms) or on Enter — so the reader is
-armed the moment the greeter appears.
+known — the user shown at startup (remembered, or `[auth] user`), the
+username entry once typing settles (`username-debounce-ms`, 400 ms) or on
+Enter, or a pick in a `username` picker — so the reader is armed the moment
+the greeter appears.
 
 **With a remembered user and session a touch is the whole login** — no
 Enter, no click, no key: the greeter comes up with both preselected (the
 state file is written at every login; `[sessions] default` covers a user
 with no session remembered yet) and the reader armed, and a matching touch
-starts that session. `rearm-window = "always"` keeps it that way for
-as long as the greeter is up. Typing the password works as usual; the
-message widget shows pam_fprintd's own texts ("Place your right thumb on
-...", "Failed to match fingerprint", "Verification timed out"). A touch
-starts the session selected at that moment, so pick another first if you
-want it. The conversation always belongs to the name shown: editing the
-username starts a new one, clearing it ends it, and a login that completes
-for a name no longer shown starts nothing.
+starts that session. `rearm-window = "always"` keeps it that way for as
+long as the greeter is up, short of a cool-down or a wait-out (below).
+Typing the password works as usual; the message widget shows pam_fprintd's
+own texts ("Place your right thumb on ...", "Failed to match fingerprint",
+"Verification timed out"). A touch starts the session selected at that
+moment, so pick another first if you want it. The conversation always
+belongs to the name shown: editing the username starts a new one, clearing
+it ends it, and a login that completes for a name no longer shown starts
+nothing.
 
-What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
+What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.3):
 
 - **greetd processes one PAM step at a time.** While pam_fprintd waits for a
   finger, nothing the greeter sends is handled — a password typed meanwhile
@@ -346,7 +450,8 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
 - **Only a fresh conversation re-arms the reader.** After its timeout
   pam_fprintd gives up and the conversation parks at the password prompt;
   `rearm-window` says when a parked conversation is restarted:
-  - `"always"` — after every timed-out cycle, for as long as the greeter is
+  - `"always"` — after every cycle that ran out (timed out, or pam_fprintd's
+    `max-tries` misses — capped, below), for as long as the greeter is
     up: a touch logs in whenever you walk up. The price is one PAM worker
     per pam_fprintd `timeout=` and the journal lines of each cancelled
     prompt (below), for as long as nobody logs in.
@@ -361,12 +466,70 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   Typing into the password entry pauses all of it: while the entry holds
   text the parked prompt is kept ready, so a password typed then goes
   through at once — for `typing-hold` (30 s) after the last key; a stray
-  character left in the entry does not switch the reader off for good. A conversation that
-  ends without a fingerprint cycle — a failed login, or a park at once
-  because the reader was claimed elsewhere or not up yet — is reopened by
-  timer, so a touch works again without any input: after 3 s, doubling up
-  to 60 s, three tries; under `"always"` without a limit, and a busy reader
-  is retried every 6 s at most. None of these timers run with `0`.
+  character left in the entry does not switch the reader off for good. A
+  conversation that ends without a fingerprint cycle — a failed login, or
+  a park at once because the reader was claimed elsewhere or not up yet —
+  is reopened by timer, so a touch works again without any input: after
+  3 s, doubling up to 60 s, three tries; under `"always"` without a limit,
+  and a busy reader is retried every 6 s at most (three parks at once in a
+  row are waited out, next). None of these timers run with `0`.
+- **A reader that never gets to wait is waited out.** Three passive
+  conversations in a row for one name that reach a prompt without a
+  fingerprint wait (nothing said first, or the prompt within a second of
+  opening: pam_faillock's lock notice is no wait) hold every re-arm for
+  31 s: no timer, input, username edit or return to the VT opens a
+  conversation meanwhile. The reader claimed elsewhere and a user without
+  prints look like that, and so does an fprintd that can no longer claim
+  the reader after the lid was closed mid-scan (fprintd 1.94.5 with
+  libfprint 1.94.100 leaves the device open when it is released while
+  suspended, and every claim fails until the daemon exits): fprintd exits
+  30 s after its last client, every re-arm is one, and the next daemon
+  starts clean. A parked prompt still takes a password, nothing is refused
+  and nothing is shown (the log says it); then the retries go on as above,
+  and the next three such parks hold them again. A run is one name's, so
+  the names typed on the way to a username do not add up; but a remembered
+  user without prints keeps an `"always"` greeter in this hold most of the
+  time, and a name typed during it gets the reader only when it ends.
+- **Failed scans are capped.** pam_fprintd gives a conversation `max-tries`
+  scans (3) and then hands over to the password, but every re-arm is a
+  fresh conversation and `pam_faillock` never sees a scan (pam_fprintd is
+  `sufficient` ahead of it), so the tries alone would be unlimited. The
+  greeter counts pam_fprintd's "Failed to match fingerprint" in every
+  conversation, on the text as PAM sent it (greetd's PAM worker never
+  translates it; `[[texts.rewrite]]` rules change what is shown, not what
+  counts) — a retry request ("Swipe was too short, try again"), "An unknown
+  error occurred" or a timeout is no miss. `fingerprint-misses` (9: three
+  conversations' worth) within `fingerprint-cooldown` seconds (600) start a
+  cool-down that long: the window gets `.hg-fingerprint-locked`, the
+  message says `[texts] fingerprint-locked` (again after a park at a secret
+  prompt or a username edit in it — a visible prompt, such as an OTP's,
+  keeps its own text; `error-clear-ms` clears it like any error), nothing
+  opens a conversation on its own — no timer, input, username edit or
+  return to the VT arms the reader — and a login completed without a
+  password prompt answered is refused. A scan already under way runs to its
+  end (greetd passes nothing on while pam_fprintd waits), so "Place your
+  finger" can still show; a match there is refused too. A miss is forgotten
+  `fingerprint-cooldown` seconds after it came, a suspend included (a
+  cool-down whose time ran out in one ends within a second of the resume),
+  and misses during a cool-down are not counted, so every cool-down ends
+  with none. The count belongs to the greeter process and every name typed
+  into it: a new greeter (after a logout or a reboot) or the one on another
+  VT starts from none. When a cool-down ends, what it held goes on as
+  `rearm-window` has it: a parked prompt re-arms under `"always"`, under
+  `N` if there was input in the last N s (else at the next input), not
+  under `0`; anything else held — a username edit, a failed or refused
+  login — opens at once (at the next input under `0`).
+- **A cool-down leaves the password working.** A prompt already parked
+  takes it at once. Otherwise PAM's order holds: a submitted password still
+  runs pam_fprintd first, which arms the reader up to its `timeout=` before
+  the password is asked for; a touch there is refused, and the password
+  goes into one new conversation (pam_fprintd's wait included). When that
+  one is refused as well (touched again), or no scan came before the
+  refused login (a stack that lets the user in without asking, like a blank
+  password under `nullok`: no way in during a cool-down), the password is
+  dropped — type it again. So the cap bounds the greeter's own re-arming,
+  not someone at the keyboard: every password submission runs
+  pam_fprintd's scans, cool-down or not.
 - **Eager mode cancels PAM prompts — carry the right stack before enabling
   it.** Every restart, username change and Escape on a half-answered
   prompt drops a conversation that may sit at the password prompt. pam_unix
@@ -410,13 +573,115 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   prompt (an OTP mid-way, whose text is then cleared); on a parked prompt
   it is just input (see above). **Enter on an empty entry** submits
   nothing. After a failed login the reader re-arms on your next input or
-  (unless `rearm-window = 0`) after 3 s, so the error stays readable. An answer typed for a
+  (unless `rearm-window = 0`) after 3 s, so the error stays readable (in a
+  wait-out or a cool-down: once it is over, above). An answer typed for a
   second-stage prompt is never reused as a password if the username
   changed meanwhile.
 
 Try the flow without hardware: `--demo` with `[auth] eager = true` in the
 config and `USER=touch` (a login with nothing pressed) or `USER=fprint`
-(a timed-out cycle; add `rearm-window = "always"` to watch it re-arm).
+(a timed-out cycle; add `rearm-window = "always"` to watch it re-arm), or
+`USER=miss` (three misses per conversation: under `"always"` the third
+conversation starts the cool-down and `.hg-fingerprint-locked`;
+`fingerprint-misses = 3` makes it the first). Under `"always"` any other
+name parks at once and is retried: the third park in a row starts the 31 s
+wait-out, which the log on stderr shows.
+
+## Upgrading
+
+### From 0.3
+
+No 0.3 key or property is gone or renamed. What behaves differently:
+
+- **`--style` and `--layout`** take a relative path from the current
+  directory, as a shell would; 0.3 took it from the config's directory.
+  `[paths]` values still resolve against the config directory.
+- **Fingerprint misses are capped by default.** `fingerprint-misses = 9`
+  scans that fail to match within `fingerprint-cooldown = 600` seconds
+  start a cool-down that long: nothing arms the reader on its own, and a
+  login no password prompt was answered in — a touch — is refused; the
+  password still logs in. The window gets `.hg-fingerprint-locked`, the
+  message says `[texts] fingerprint-locked`. `0` in either key gives 0.3's
+  unlimited tries back. See [Fingerprint](#fingerprint-pam_fprintd).
+- **A reader that never gets to wait is waited out.** Three passive
+  conversations in a row for one name that reach a prompt without a
+  fingerprint wait hold every re-arm for 31 s, so an fprintd that can no
+  longer claim the reader (the lid closed mid-scan) exits and the next one
+  starts clean; 0.3 kept re-arming every few seconds, which kept that
+  fprintd alive. A parked prompt still takes a password meanwhile.
+- **Logs reach the journal** however the greeter is started: when stderr
+  is not the journal (a compositor's `exec` hands it `/dev/null`), each
+  line, GTK's warnings included, goes to journald —
+  `journalctl -t hypred-greeter`. A `systemd-cat` wrapper still works and
+  logs nothing twice.
+- **Avatars** (`source = "avatar"`) show only a PNG or JPEG file of at most
+  1 MiB and 4096 px a side; a picture in another format, which 0.3 showed,
+  now shows nothing.
+- **Images are clipped to their box and centred.** An `image`, and a
+  button's icon, no longer draws outside its box, so `border-radius` rounds
+  the picture and `-gtk-icon-transform: scale()` crops it to cover; the
+  widget is centred where its parent has more room, unless `anchor` or
+  `halign`/`valign` place it; a non-square avatar shows its centre square.
+- **The colour scheme.** `[gtk] dark` sets GTK's colour scheme
+  (`gtk-interface-color-scheme`, GTK 4.20), and the stylesheet's
+  `@media (prefers-color-scheme: dark)` follows it — in 0.3 it never
+  matched there — as `(prefers-contrast: more)` and
+  `(prefers-reduced-motion: reduce)` follow GTK's settings. From GTK 4.23
+  the deprecated `gtk-application-prefer-dark-theme` is no longer written,
+  so no warning at every start; `theme = "Empty"` with `dark = true` is a
+  blank slate on 4.24 too (0.3 got GTK's light Default theme there), and
+  `dark` without `theme` loads the theme again so that a theme's own
+  `gtk-dark.css` shows.
+- **CSS warnings**: a block GTK never applies (an undefined `@media`
+  feature) and a file that ends inside a block now reach the banner;
+  deprecations, a block's last declaration without `;` and an empty one
+  (`;;`) are only logged.
+- **State classes.** `.hg-failed` also ends with a message widget's
+  `error-clear-ms` (after its 1.5 s hold), no longer sticks after a stall,
+  and an `animation:` on it restarts on every failure, even one in the
+  frame a re-arm or a submission took the class off. Under `--demo`,
+  `.hg-starting` stays until the next attempt, so that a theme can preview
+  it.
+- **An empty username** — Enter in the password entry with no name — sends
+  the focus to the `username` widget along with `[texts] enter-username`;
+  0.3 left it in the password entry.
+- **`prompt-placeholder`** keeps the widget's own placeholder for a prompt
+  a `[[texts.rewrite]]` rule dropped (0.3 showed none), and a re-arm puts
+  it back until the next prompt (0.3 kept the last prompt's text through
+  every re-armed cycle).
+- **A command that fails is reported**: a power, `button` or `[keys]`
+  command that exits unsuccessfully within 10 s shows
+  `[texts] power-failed`, with an `{error}` such as `exit status: 1`; 0.3
+  reported only one that could not start. A run less than 2 s after the
+  last of the same command reports nothing, not even a command that cannot
+  start, which 0.3 reported every time.
+- **A `password` widget that fails to build** (a bad property) makes the
+  layout fall back to the built-in one, with a banner line — 0.3 left its
+  ⚠ placeholder and no way to type a password. So does one that is never
+  built (its parent fails to build or is no container), and, while no user
+  is known, such a `username` widget. A `username` widget skips a property
+  it cannot use instead of failing.
+- **Label command output** keeps `{{` and `}}` as they are (0.3 made each
+  one brace), and under `markup` a placeholder's value no longer fails the
+  build check (`{time:%d & %m}`).
+
+New: `--check`; `[keys]`; `[auth] fixed-user`, `fingerprint-misses` and
+`fingerprint-cooldown`; `username` pickers (`style = "dropdown"` or
+`"buttons"`, with `.hg-username-item`) and `.hg-username-fixed`;
+`mask-visible` and `invisible-char` on `password`; the state classes
+`.hg-prompt-visible` and `.hg-fingerprint-locked`;
+`[texts] fingerprint-locked`; the `--demo` user `miss`.
+
+### From 0.2
+
+The built-in layout used to carry its gaps and offsets. A stylesheet kept
+from 0.2 next to the new layout.toml gets none of them; a layout.toml
+copied from 0.2 next to the new style.css gets them twice. Add to a custom
+stylesheet what the default one now has — `#card { border-spacing: 12px; }`,
+`.hg-clock { margin-top: 48px; }`,
+`.hg-power { margin: 0 24px 24px 0; border-spacing: 8px; }` — and drop
+`spacing`/`margin` from a copied layout; the `power` widget's own `spacing`
+now defaults to 0.
 
 ## Development
 

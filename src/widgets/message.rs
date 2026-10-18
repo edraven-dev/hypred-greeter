@@ -145,6 +145,7 @@ impl WidgetDef for MessageDef {
         let weak = label.downgrade();
         let latest = Rc::new(Cell::new(0u64));
         let error_since = Rc::new(Cell::new(None::<Instant>));
+        let app = ctx.app.clone();
         ctx.bus.subscribe(move |event| {
             let Some(label) = weak.upgrade() else { return };
             let generation = latest.get() + 1;
@@ -171,8 +172,8 @@ impl WidgetDef for MessageDef {
                     if error_clear.is_zero() {
                         return;
                     }
-                    let (weak, latest, error_since) =
-                        (label.downgrade(), latest.clone(), error_since.clone());
+                    let (weak, latest, error_since, app) =
+                        (label.downgrade(), latest.clone(), error_since.clone(), app.clone());
                     glib::timeout_add_local_once(error_clear, move || {
                         if latest.get() != generation {
                             return;
@@ -181,6 +182,7 @@ impl WidgetDef for MessageDef {
                         if let Some(label) = weak.upgrade() {
                             show(&label, "", State::Empty, hide_empty);
                         }
+                        app.clear_failed();
                     });
                 }
                 UiEvent::Prompt { secret, text, passive } => {
@@ -196,6 +198,7 @@ impl WidgetDef for MessageDef {
                 UiEvent::Busy(_)
                 | UiEvent::SessionChanged(_)
                 | UiEvent::Armed(_)
+                | UiEvent::FingerprintLocked(_)
                 | UiEvent::Starting
                 | UiEvent::Focus(_)
                 | UiEvent::UsernameChanged(_) => {}

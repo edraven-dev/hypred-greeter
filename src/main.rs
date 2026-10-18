@@ -1,7 +1,10 @@
 //! Exit codes: 0 session started, 1 startup failure, 2 greetd transport
-//! failure, 101 panic. greetd starts the chosen session only after this
-//! process exits, so it must always exit.
+//! failure, 101 panic; with --check 0 nothing to report, 1 problems or no
+//! check at all.
+//! greetd starts the chosen session only after this process exits, so it
+//! must always exit.
 
+mod actions;
 mod auth;
 mod backend;
 mod cli;
@@ -13,6 +16,7 @@ mod seat;
 mod sessions;
 mod state;
 mod ui;
+mod users;
 mod widgets;
 
 use gtk4 as gtk;
@@ -26,14 +30,15 @@ fn main() {
     // A panic unwinding into the GTK main loop wedges the process without
     // exiting — that's a dark screen at boot.
     std::panic::set_hook(Box::new(|info| {
-        eprintln!("[hypred-greeter] panic: {info}");
+        log::error!("panic: {info}");
         std::process::exit(101);
     }));
 
     let args = cli::parse();
+    log::init(args.greetd());
 
-    if !args.demo && std::env::var_os("GREETD_SOCK").is_none() {
-        log::error!("GREETD_SOCK is not set and --demo not given; run under greetd or pass --demo");
+    if args.greetd() && std::env::var_os("GREETD_SOCK").is_none() {
+        log::error!("GREETD_SOCK is not set; run under greetd, or pass --demo or --check");
         std::process::exit(1);
     }
 
@@ -55,15 +60,13 @@ fn main() {
         ui::apply_gtk_settings(&loaded.config.gtk);
         let style = loaded.resolve(args.style.as_deref(), &loaded.config.paths.style);
         let mut problems = loaded.problems.clone();
-        problems.extend(ui::load_css(&style));
+        let css = ui::load_css(&style, &loaded.config.gtk);
+        problems.extend(ui::css_lines(css, args.check));
 
-        let saved = state::load();
-        let initial_username = saved
-            .last_user
-            .clone()
-            .or_else(|| loaded.config.auth.user.clone())
-            .or_else(|| if args.demo { std::env::var("USER").ok() } else { None })
-            .unwrap_or_default();
+        let saved = if args.reads_state() { state::load() } else { state::State::default() };
+        let demo_user = if args.demo { std::env::var("USER").ok() } else { None };
+        let initial_username =
+            users::initial(saved.last_user.as_deref(), &loaded.config.auth, demo_user.as_deref());
 
         let layout_path = loaded.resolve(args.layout.as_deref(), &loaded.config.paths.layout);
         let layout = layout::load(&layout_path, !args.demo, !initial_username.is_empty());
@@ -72,9 +75,7 @@ fn main() {
         }
         problems.extend(layout.problems);
 
-        let backend: Box<dyn backend::Backend> = if args.demo {
-            Box::new(backend::DemoBackend::new())
-        } else {
+        let backend: Box<dyn backend::Backend> = if args.greetd() {
             match backend::GreetdBackend::connect() {
                 Ok(backend) => Box::new(backend),
                 Err(err) => {
@@ -82,6 +83,8 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        } else {
+            Box::new(backend::DemoBackend::new())
         };
 
         let discovered = sessions::discover();
@@ -108,7 +111,7 @@ fn main() {
         let current = shared.clone();
         let resolver = shared.clone();
         let resolver_config = loaded.clone();
-        let demo = args.demo;
+        let (demo, persist) = (args.demo, args.greetd());
         let auth = auth::Auth::start(
             backend,
             bus.clone(),
@@ -124,7 +127,7 @@ fn main() {
                         if let Some(session) = resolver.selected() {
                             state.last_session.insert(username.to_string(), session.cache_id());
                         }
-                        if !demo {
+                        if persist {
                             state::save(&state);
                         }
                     }
@@ -157,10 +160,37 @@ fn main() {
             &registry,
             handle.clone(),
             args.demo,
+            args.check,
         );
-        let root = layout::build::build_node(&ctx, &layout.root);
+        let fallback;
+        let mut tree = &layout.root;
+        let mut root = layout::build::build_node(&ctx, tree);
+        let known_user = !handle.username().is_empty();
+        let built = if args.demo {
+            Ok(())
+        } else {
+            layout::login_built(ctx.built("password"), ctx.built("username"), known_user)
+        };
+        if let Err(why) = built {
+            ctx.problem(format!("{why} — using built-in layout"));
+            ctx.discard_commands();
+            fallback = layout::builtin();
+            tree = &fallback;
+            root = layout::build::build_node(&ctx, tree);
+        }
+        ctx.start_commands();
         problems.extend(ctx.take_problems());
-        let focus_placed = layout::requests_focus(&layout.root);
+        let focus_placed = layout::requests_focus(tree);
+        let shortcuts = actions::shortcuts(&loaded.config, &handle, args.demo, &mut problems);
+
+        // Every problem source comes before this: --check ends here.
+        if args.check {
+            let (lines, code) = cli::check_report(&problems);
+            for line in lines {
+                eprintln!("[hypred-greeter] {line}");
+            }
+            std::process::exit(code);
+        }
 
         let window =
             gtk::ApplicationWindow::builder().application(app).title("hypred-greeter").build();
@@ -173,7 +203,7 @@ fn main() {
             window.add_css_class("hg-problems");
         }
         window.set_child(Some(&ui::window_content(&problems, root)));
-        ui::track_states(&window, &handle.bus);
+        ui::track_states(&window, &handle);
         handle.emit(&UiEvent::UsernameChanged(handle.username()));
         if args.demo {
             // No title bar: the published viewport is the surface's size,
@@ -196,6 +226,12 @@ fn main() {
         }
         window.present();
 
+        // GTK runs the controller added last first, and a key a shortcut
+        // takes goes no further: the activity watcher is added after these,
+        // so a bound key still counts as input.
+        for controller in shortcuts {
+            window.add_controller(controller);
+        }
         // Capture phase: sees every key/pointer event before a child can
         // stop it.
         let activity = gtk::EventControllerLegacy::new();
