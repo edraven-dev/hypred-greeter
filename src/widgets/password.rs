@@ -25,7 +25,7 @@ impl WidgetDef for PasswordDef {
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
         let placeholder = node.props.str_or("placeholder", "password")?;
         let prompt_placeholder = node.props.bool("prompt-placeholder")?.unwrap_or(false);
-        let mask_visible = node.props.bool("mask-visible")?.unwrap_or(true);
+        let mask_visible = mask_visible(node)?;
         let mask_char = invisible_char(node)?;
         let entry = gtk::PasswordEntry::builder()
             .placeholder_text(placeholder.as_str())
@@ -78,14 +78,11 @@ impl WidgetDef for PasswordDef {
                     unmasked.set(clear);
                 }
             }
-            // A pending non-default prompt ("New password:") stands in for
-            // the placeholder; anything that ends it puts the own one back.
-            let placeholder_for = |prompt: Option<&str>| {
-                if prompt_placeholder {
-                    let text = prompt.filter(|text| !is_default_prompt(text));
-                    entry.set_placeholder_text(Some(text.unwrap_or(&placeholder)));
+            if prompt_placeholder {
+                if let Some(prompt) = placeholder_after(event) {
+                    entry.set_placeholder_text(Some(prompt.unwrap_or(&placeholder)));
                 }
-            };
+            }
             match event {
                 // Read-only rather than insensitive: an insensitive entry
                 // drops focus and ignores keys, so Escape could not take back
@@ -94,7 +91,6 @@ impl WidgetDef for PasswordDef {
                     entry.set_editable(!busy);
                     if *busy {
                         entry.add_css_class("hg-password-busy");
-                        placeholder_for(None);
                     } else {
                         entry.remove_css_class("hg-password-busy");
                     }
@@ -102,28 +98,16 @@ impl WidgetDef for PasswordDef {
                 UiEvent::AuthError(_) => {
                     entry.set_text("");
                     entry.grab_focus();
-                    placeholder_for(None);
                 }
-                UiEvent::Prompt { text, passive, .. } => {
-                    placeholder_for(Some(text));
-                    if !*passive {
-                        entry.grab_focus();
-                    }
-                }
-                UiEvent::Info(text) => {
-                    if text.is_empty() {
-                        placeholder_for(None);
-                    }
-                }
-                // A re-arm ends a parked prompt with no other event.
-                UiEvent::Armed(true) => placeholder_for(None),
-                UiEvent::Focus(FocusTarget::Password) => {
+                UiEvent::Prompt { passive: false, .. } | UiEvent::Focus(FocusTarget::Password) => {
                     entry.grab_focus();
                 }
-                UiEvent::Focus(FocusTarget::Username)
+                UiEvent::Prompt { passive: true, .. }
+                | UiEvent::Info(_)
+                | UiEvent::Focus(FocusTarget::Username)
                 | UiEvent::PamError(_)
                 | UiEvent::SessionChanged(_)
-                | UiEvent::Armed(false)
+                | UiEvent::Armed(_)
                 | UiEvent::Starting
                 | UiEvent::UsernameChanged(_) => {}
             }
@@ -137,6 +121,10 @@ fn text_of(entry: &gtk::PasswordEntry) -> Option<gtk::Text> {
     entry.delegate().and_downcast()
 }
 
+fn mask_visible(node: &Node) -> Result<bool, WidgetError> {
+    Ok(node.props.bool("mask-visible")?.unwrap_or(true))
+}
+
 /// The one character the mask shows; unset, GTK picks one the font has.
 /// No CSS property reaches it.
 fn invisible_char(node: &Node) -> Result<Option<char>, WidgetError> {
@@ -145,6 +133,26 @@ fn invisible_char(node: &Node) -> Result<Option<char>, WidgetError> {
     match (chars.next(), chars.next()) {
         (Some(only), None) => Ok(Some(only)),
         _ => Err(WidgetError::Other("`invisible-char` must be exactly one character".into())),
+    }
+}
+
+/// With `prompt-placeholder`: the placeholder after `event`, `Some(None)`
+/// being the widget's own. A pending prompt other than the plain
+/// "Password:" ("New password:", "Token:") stands in for it until the
+/// prompt ends; a re-arm ends a parked one with nothing but `Armed`.
+fn placeholder_after(event: &UiEvent) -> Option<Option<&str>> {
+    match event {
+        UiEvent::Prompt { text, .. } => Some(Some(text.as_str()).filter(|t| !is_default_prompt(t))),
+        UiEvent::Busy(true) | UiEvent::AuthError(_) | UiEvent::Armed(true) => Some(None),
+        UiEvent::Info(text) if text.is_empty() => Some(None),
+        UiEvent::Info(_)
+        | UiEvent::Busy(false)
+        | UiEvent::PamError(_)
+        | UiEvent::SessionChanged(_)
+        | UiEvent::Armed(false)
+        | UiEvent::Starting
+        | UiEvent::Focus(_)
+        | UiEvent::UsernameChanged(_) => None,
     }
 }
 
@@ -194,6 +202,45 @@ mod tests {
         }
         let err = invisible_char(&node("invisible-char = 42")).unwrap_err().to_string();
         assert!(err.contains("expects a string"), "{err}");
+    }
+
+    #[test]
+    fn a_visible_prompts_answer_is_masked_unless_the_layout_says_otherwise() {
+        assert!(mask_visible(&node("")).unwrap());
+        assert!(mask_visible(&node("mask-visible = true")).unwrap());
+        assert!(!mask_visible(&node("mask-visible = false")).unwrap());
+        let err = mask_visible(&node("mask-visible = \"no\"")).unwrap_err().to_string();
+        assert!(err.contains("expects a boolean"), "{err}");
+    }
+
+    #[test]
+    fn a_prompt_stands_in_for_the_placeholder_until_it_ends() {
+        let prompt =
+            |secret, text: &str| UiEvent::Prompt { secret, text: text.into(), passive: true };
+        assert_eq!(placeholder_after(&prompt(false, "Token:")), Some(Some("Token:")));
+        assert_eq!(placeholder_after(&prompt(true, "New password:")), Some(Some("New password:")));
+        assert_eq!(placeholder_after(&prompt(true, "Password: ")), Some(None));
+        let ends = [
+            UiEvent::Busy(true),
+            UiEvent::AuthError("demo: wrong password".into()),
+            UiEvent::Info(String::new()),
+            UiEvent::Armed(true),
+        ];
+        for event in &ends {
+            assert_eq!(placeholder_after(event), Some(None), "{event:?}");
+        }
+        for event in [
+            UiEvent::Info("Place your finger".into()),
+            UiEvent::Busy(false),
+            UiEvent::PamError("Failed to match fingerprint".into()),
+            UiEvent::Armed(false),
+            UiEvent::Starting,
+            UiEvent::Focus(FocusTarget::Password),
+            UiEvent::SessionChanged(0),
+            UiEvent::UsernameChanged("mfa".into()),
+        ] {
+            assert_eq!(placeholder_after(&event), None, "{event:?}");
+        }
     }
 
     #[test]
