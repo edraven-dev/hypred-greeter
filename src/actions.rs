@@ -163,7 +163,9 @@ fn report(app: &AppHandle, template: &str, argv: &[String], why: &str) {
 /// The `[keys]` table, as controllers to add to the window in this order:
 /// GTK runs the one added last first, and the key watcher has to see every
 /// press before a shortcut takes it. Capture phase: a bound key works
-/// whatever has the focus, before an entry can take it as input.
+/// whatever widget has the focus, before an entry can take it as input —
+/// but an open dropdown list or menu is a surface of its own, and its keys
+/// never reach the window.
 pub fn shortcuts(
     config: &Config,
     app: &AppHandle,

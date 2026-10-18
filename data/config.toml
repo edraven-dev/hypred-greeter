@@ -58,7 +58,8 @@ poweroff = ["systemctl", "poweroff"]
 [keys]
 # A key as GTK writes it → an action, named as a `button` names it: cancel,
 # next-session, prev-session, focus-username, focus-password, or a
-# [commands] name. Works whatever has the focus; a key an entry takes as
+# [commands] name. Works whatever widget has the focus, but not while a
+# dropdown's list or a right-click menu is open; a key an entry takes as
 # input (a character, Enter, Tab, Backspace, Delete, Escape) needs
 # <Control>, <Alt> or <Super>. Held down, a key runs its command once.
 # "<Control><Alt>Delete" = "reboot"

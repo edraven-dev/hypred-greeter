@@ -68,8 +68,8 @@ A key the greeter does not know (a typo like `rearm_window`) keeps its
 default in force and is named in the on-screen banner. An id in
 `[sessions]` that matches no installed session is named there too.
 
-**Key bindings.** `[keys]` runs an action on a key, whatever has the
-focus — a built-in (`cancel`, `next-session`, `prev-session`,
+**Key bindings.** `[keys]` runs an action on a key, whatever widget has
+the focus — a built-in (`cancel`, `next-session`, `prev-session`,
 `focus-username`, `focus-password`) or a `[commands]` name, exactly as
 `button` takes it:
 
@@ -86,8 +86,9 @@ key, one GTK cannot read, an unknown action and a key bound twice
 (`<Ctrl>r`, `<Control>r`: the first in the file wins) are named in the
 banner.
 A key acts at once (keys have no `confirm`); held down, it runs its command
-once, while `next-session` and `prev-session` keep stepping. `--demo`
-announces a command instead of running it.
+once, while `next-session` and `prev-session` keep stepping. An open
+dropdown list or right-click menu keeps the keys to itself: close it
+first. `--demo` announces a command instead of running it.
 
 **Rewriting texts.** Every text shown — PAM's info and error messages,
 prompts, the failure after a wrong password, the greeter's own — passes
