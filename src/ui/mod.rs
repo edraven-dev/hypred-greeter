@@ -300,19 +300,41 @@ fn toggle_class(widget: &impl IsA<gtk::Widget>, class: &str, on: bool) {
 fn state_changes(event: &UiEvent) -> Vec<(&'static str, bool)> {
     match event {
         UiEvent::Busy(true) => {
-            vec![("hg-busy", true), ("hg-failed", false), ("hg-starting", false)]
+            vec![
+                ("hg-busy", true),
+                ("hg-failed", false),
+                ("hg-starting", false),
+                ("hg-prompt-visible", false),
+            ]
         }
         UiEvent::Busy(false) => vec![("hg-busy", false)],
-        UiEvent::AuthError(_) | UiEvent::PamError(_) => {
+        UiEvent::AuthError(_) => vec![
+            ("hg-failed", true),
+            ("hg-info", false),
+            ("hg-starting", false),
+            ("hg-prompt-visible", false),
+        ],
+        // PAM sends no error while a prompt waits; one of the greeter's own
+        // (a failed command) leaves a visible prompt pending.
+        UiEvent::PamError(_) => {
             vec![("hg-failed", true), ("hg-info", false), ("hg-starting", false)]
         }
-        UiEvent::Prompt { .. } => {
-            vec![("hg-failed", false), ("hg-info", false), ("hg-starting", false)]
+        UiEvent::Prompt { secret, .. } => vec![
+            ("hg-failed", false),
+            ("hg-info", false),
+            ("hg-starting", false),
+            ("hg-prompt-visible", !secret),
+        ],
+        UiEvent::Info(text) if text.is_empty() => {
+            vec![("hg-failed", false), ("hg-info", false), ("hg-prompt-visible", false)]
         }
-        UiEvent::Info(text) => vec![("hg-failed", false), ("hg-info", !text.is_empty())],
-        UiEvent::Armed(true) => {
-            vec![("hg-armed", true), ("hg-failed", false), ("hg-starting", false)]
-        }
+        UiEvent::Info(_) => vec![("hg-failed", false), ("hg-info", true)],
+        UiEvent::Armed(true) => vec![
+            ("hg-armed", true),
+            ("hg-failed", false),
+            ("hg-starting", false),
+            ("hg-prompt-visible", false),
+        ],
         UiEvent::Armed(false) => vec![("hg-armed", false)],
         UiEvent::Starting => vec![("hg-starting", true)],
         UiEvent::FingerprintLocked(locked) => vec![("hg-fingerprint-locked", *locked)],
@@ -710,5 +732,42 @@ mod tests {
             [&started[..3], &[UiEvent::Busy(false), UiEvent::AuthError("could not start".into())]]
                 .concat();
         assert_eq!(classes_after(&refused), ["hg-failed"]);
+    }
+
+    #[test]
+    fn a_pending_visible_prompt_marks_the_window() {
+        let on = |event: &UiEvent| {
+            let changes = state_changes(event);
+            changes.iter().find(|(class, _)| *class == "hg-prompt-visible").map(|(_, on)| *on)
+        };
+        let prompt = |secret, passive| UiEvent::Prompt { secret, text: "Token:".into(), passive };
+        assert_eq!(on(&prompt(false, false)), Some(true));
+        assert_eq!(on(&prompt(false, true)), Some(true));
+        for ends in [
+            prompt(true, false),
+            prompt(true, true),
+            UiEvent::Busy(true),
+            UiEvent::AuthError("no".into()),
+            UiEvent::Info(String::new()),
+            // A re-arm leaves a parked prompt with no other event.
+            UiEvent::Armed(true),
+        ] {
+            assert_eq!(on(&ends), Some(false), "{ends:?}");
+        }
+        for leaves in [
+            UiEvent::PamError("could not run poweroff".into()),
+            UiEvent::Info("demo: any token accepted".into()),
+            UiEvent::Busy(false),
+            UiEvent::Armed(false),
+            UiEvent::Starting,
+            UiEvent::Focus(FocusTarget::Password),
+            UiEvent::SessionChanged(1),
+            UiEvent::UsernameChanged("mfa".into()),
+            UiEvent::FingerprintLocked(true),
+        ] {
+            assert_eq!(on(&leaves), None, "{leaves:?}");
+        }
+        let cleared = state_changes(&UiEvent::Info(String::new()));
+        assert!(cleared.contains(&("hg-failed", false)) && cleared.contains(&("hg-info", false)));
     }
 }

@@ -167,13 +167,13 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 | `box` | `orientation`, `spacing`, `homogeneous` | container |
 | `overlay` | — | container; children after the first float, placed by `anchor` |
 | `grid` | `row-spacing`, `column-spacing`; children take `col`, `row`, `col-span`, `row-span` | container |
-| `label` | `text`, `wrap`, `max-width-chars`, text properties, `command` (argv) + `interval` (seconds) | text with placeholders: `{user}` (the username entry), `{hostname}`, `{session}` (the selected session's name), `{time:%H:%M}` (strftime, ticks every second); `{{`/`}}` for a literal brace. With `command` the trimmed stdout is the text (placeholders apply to it too), run off the main thread once, or every `interval` seconds — in `--demo` too; a failing run leaves the previous text; braces in the output are plain text, and under `markup` the output is escaped. A wrapping label asks for its one-line width unless capped |
+| `label` | `text`, `wrap`, `max-width-chars`, text properties, `command` (argv) + `interval` (seconds) | text with placeholders: `{user}` (the username entry), `{hostname}`, `{session}` (the selected session's name), `{time:%H:%M}` (strftime, ticks every second); `{{`/`}}` for a literal brace. With `command` the trimmed stdout is the text (placeholders apply to it too), run off the main thread once, or every `interval` seconds — in `--demo` too; a failing run leaves the previous text; in the output only an exact placeholder is one, every other brace (`{{` and `}}` too) is plain text, and under `markup` the output is escaped. A wrapping label asks for its one-line width unless capped |
 | `button` | `label` and/or `icon` (a theme icon name or an absolute image path), `tooltip`, `action` or `command` (exactly one), `confirm` | `action`: a `[commands]` name, or built-in `cancel`, `next-session`, `prev-session`, `focus-username`, `focus-password`; `command = [argv]` runs that argv. Icon + label render as a box inside the button (icon first). `confirm = true`: the first click arms it (`.hg-button-confirm` for 3 s), the second runs it. Demo mode shows "demo: would run …" instead |
-| `image` | exactly one of `file` (a path; relative to the config dir), `icon` (theme icon name), `source = "avatar"`; `size` (pixels) | a picture. `avatar`: the current user's — `/var/lib/AccountsService/icons/<user>`, then `~<user>/.face`; re-read as the username changes; nothing readable (or anything but a regular file of at most 1 MiB and 4096 px a side) shows nothing. Without `size` a GtkImage shows at the stylesheet's `-gtk-icon-size` (16 px unless set); `size` is the box the picture fits in |
+| `image` | exactly one of `file` (a path; relative to the config dir), `icon` (theme icon name), `source = "avatar"`; `size` (pixels) | a picture, contained in a square box and clipped to it; the widget is that box, centred where its parent has more room (unless `anchor` or `halign`/`valign` place it). `avatar`: the current user's — `/var/lib/AccountsService/icons/<user>`, then `~<user>/.face`; re-read as the username changes; a photo that is not square shows its centre square, so a round avatar has no bars; nothing readable, or anything but a PNG or JPEG file of at most 1 MiB and 4096 px a side, shows nothing. Size, rounding and cover are the stylesheet's, the way meant for themes: `-gtk-icon-size` sets the box (16 px unless set), `border-radius` rounds the picture, `-gtk-icon-transform: scale()` crops it to cover the box — see [What GTK CSS does not do](#what-gtk-css-does-not-do). `size` sets the box from the layout instead and overrides `-gtk-icon-size` |
 | `background` | `image`, `fit` | wallpaper; defaults from `[background]` |
 | `clock` | `format` (strftime), text properties | ticks every second |
 | `username` | `placeholder`, `xalign` | prefilled with the last user (else `[auth] user`); Enter moves on to the password |
-| `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
+| `password` | `placeholder`, `peek`, `prompt-placeholder` (a pending prompt other than the plain "Password:" — "New password:", an OTP's "Token:" — shows as the placeholder), `mask-visible` (`true`; `false`: what is typed into the empty entry at a visible prompt, such as an OTP, shows in clear until that prompt ends — at a secret prompt, a submission, a failed or dropped conversation, a re-arm — or the username is edited; a password typed before the prompt came stays masked, and text the peek icon revealed stays revealed), `invisible-char` (the one character the mask shows, such as `"*"`; unset, GTK's pick: the first of ● • ✱ ✺ the font has, else `*`), `xalign` | Enter submits (empty: nothing), Escape cancels; read-only while a submitted password is on its way; caps-lock warning built in |
 | `message` | `text`, `max-width-chars` (30), `hide-empty` (hidden — no gap either — while it has nothing to say), `settle-ms` (250), `error-hold-ms` (1500), `error-clear-ms` (0: an error stays; else it goes after this long, and the window's `.hg-failed` with it), `secret-prompts` (`hide`, `show`, or `non-default`: a secret prompt's text unless it is the plain "Password:"), text properties | PAM info/errors land here, wrapped to the container's width; info is shown after `settle-ms` — see [state classes](#state-classes) |
 | `session` | `style` (`dropdown`, `buttons`, `cycle`), for `buttons`: `orientation`, `spacing` | the sessions `[sessions]` leaves, named as it says. `buttons`: a linked row of toggle buttons (`.hg-session-item`, the selected one `:checked`); `cycle`: one button showing the selection, a click moves on. All three follow each other and the remembered session |
 | `power` | `reboot-label`, `poweroff-label`, `orientation`, `spacing` (0) | sugar: a box of two `button`s named `#hg-power-reboot` / `#hg-power-poweroff` with `action = "reboot"` / `"poweroff"` — build the same by hand for a third one |
@@ -182,8 +182,12 @@ from a copied layout; the `power` widget's own `spacing` now defaults to 0.
 within the space the widget gets), `justify` (`left`/`center`/`right`/`fill`,
 for wrapped lines), `ellipsize` (`none`/`start`/`middle`/`end`), `lines` (with
 `ellipsize`: at most that many lines), `markup` (the text is Pango markup:
-`format = "<b>%H</b>:%M"`; a text with a bare `&` or `<` fails to parse and
-is skipped, so leave it off `message`, which shows PAM's texts).
+`format = "<b>%H</b>:%M"`, `&amp;` for a literal `&`; what a placeholder or
+a strftime conversion puts in is escaped, so `{time:%d & %m}` needs no
+`&amp;`. A label's `text` or a clock's `format` that is not valid markup is
+rejected: a ⚠ placeholder and a banner line. PAM's texts reach `message`
+later, and one that is not valid markup is not shown (the label keeps what
+it had), so leave `markup` off `message`).
 
 ### style.css — every selector you need
 
@@ -262,6 +266,7 @@ message label:
 | `.hg-busy` | a submitted password is on its way |
 | `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
+| `.hg-prompt-visible` | a visible (non-secret) prompt is pending, such as an OTP's "Token:" — style its answer (`.hg-prompt-visible entry.hg-password { font-family: monospace; }`); off again at a secret prompt, a submission, an auth error, a re-arm, and when the conversation is dropped (a failed command's error leaves it on: the prompt still waits) |
 | `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in (never while `.hg-fingerprint-locked`) |
 | `.hg-fingerprint-locked` | a fingerprint cool-down: for `fingerprint-cooldown` seconds after too many misses nothing arms the reader on its own and a login without a password is refused — see [Fingerprint](#fingerprint-pam_fprintd) |
 | `.hg-starting` | the session is being started: under greetd until the greeter exits, a round trip later (too soon for a transition to show); in `--demo`, where nothing starts, until the next attempt (a submission, re-arm or prompt), so a theme can preview it; a failed start drops it |
@@ -293,8 +298,11 @@ GTK 4.22):
 | `width`, `height`, `max-width` | `min-width`/`min-height` (with `--hg-vw` for a share of the screen), `max-width-chars` on text widgets, `width`/`height` in layout.toml |
 | `%`, `vw`, `vh` units | `calc(var(--hg-vw) * 25)` |
 | `text-align` | `xalign`/`justify` on the widget in layout.toml |
+| a password's mask character | `invisible-char` on the `password` widget in layout.toml |
 | `display: none` | `visible = false` in layout.toml, `hide-empty` on the message; `opacity: 0` hides but keeps the space |
 | `cursor` | `[gtk] cursor-theme`; the pointer shape is the widget's |
+| `object-fit` | an `image` is contained in its box; `-gtk-icon-transform: scale(2)` on `.hg-image` crops a 2:1 picture to cover it (scale by the long side over the short one). A static file can also be the background of a named empty `box`: `#logo { background-image: url("logo.png"); background-size: cover; background-position: center; min-width: 128px; min-height: 128px; }` (to fit instead: `contain` and `background-repeat: no-repeat`; the url is relative to the stylesheet) |
+| `overflow` | none needed: an `image`, and a button's icon (`.hg-button image`), is clipped to its box, so `.hg-image { -gtk-icon-size: 128px; border-radius: 50%; }` is a round picture; an `-gtk-icon-shadow` shows only inside the box (give it `padding`) |
 | `:has()`, `:empty` | the state classes above (`.hg-info`, `.hg-message-empty`) |
 
 ## Writing a widget (addons)

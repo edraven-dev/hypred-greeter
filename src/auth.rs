@@ -1443,6 +1443,29 @@ mod tests {
         assert_eq!(seen, expected);
     }
 
+    /// pam_fprintd times out, then a module asks something visible.
+    fn fprint_then_token(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(Info, "Verification timed out"),
+            Step::Msg(Visible, "Token:"),
+        ]
+    }
+
+    #[test]
+    fn a_rearm_leaves_a_parked_visible_prompt_through_armed_alone() {
+        let (backend, seen, _) = scripted(fprint_then_token);
+        let log = drive_with(backend, eager(10), |auth, pump| {
+            auth.start_eager("edraven");
+            auth.backdate(Duration::from_secs(2));
+            pump();
+        });
+        let cycle = ["create edraven", "respond None", "respond None"];
+        assert_eq!(requests(&seen), [&cycle[..], &["cancel"], &cycle[..]].concat());
+        let token = log.iter().position(|event| event == "prompt[false,passive] Token:");
+        assert_eq!(log[token.expect("parked at the token") + 1], "armed true", "{log:?}");
+    }
+
     #[test]
     fn parked_outside_the_window_or_without_a_window_stays_parked() {
         let cycle = ["create edraven", "respond None", "respond None"];

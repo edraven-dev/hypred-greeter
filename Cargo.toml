@@ -16,6 +16,7 @@ toml = "1"
 shlex = "2"
 async-channel = "2"
 serde_ignored = "0.1.14"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

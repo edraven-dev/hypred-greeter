@@ -448,6 +448,7 @@ dependencies = [
  "glib",
  "greetd_ipc",
  "gtk4",
+ "libc",
  "serde",
  "serde_ignored",
  "shlex",
