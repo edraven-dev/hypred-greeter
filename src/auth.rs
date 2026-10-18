@@ -95,6 +95,8 @@ enum Phase {
         saw_info: bool,
         started: Instant,
         asked_secret: bool,
+        /// The last prompt's text, as PAM worded it.
+        asked: String,
         answered_secret: bool,
         /// Opened for the password of a login refused in a cool-down.
         resubmitted: bool,
@@ -610,6 +612,7 @@ impl Auth {
             saw_info: false,
             started: Instant::now(),
             asked_secret: false,
+            asked: String::new(),
             answered_secret: false,
             resubmitted: false,
         };
@@ -722,9 +725,10 @@ impl Auth {
     fn await_input(&self, secret: bool, text: String) {
         let cycled = self.cycle_ran();
         let (passive, user) = match &mut *self.phase.borrow_mut() {
-            Phase::Conversing { user, awaiting_input, passive, asked_secret, .. } => {
+            Phase::Conversing { user, awaiting_input, passive, asked_secret, asked, .. } => {
                 *awaiting_input = true;
                 *asked_secret = secret;
+                asked.clone_from(&text);
                 (*passive, user.clone())
             }
             _ => (false, String::new()),
@@ -735,8 +739,8 @@ impl Auth {
         if passive {
             self.note_park(user, cycled);
             // Whatever cooling_shown says: a message widget may show the
-            // prompt over it.
-            if self.cooling() {
+            // prompt over it. A visible one (an OTP) is not the password.
+            if secret && self.cooling() {
                 self.say_cooling();
             }
             self.maybe_rearm();
@@ -854,9 +858,26 @@ impl Auth {
         self.emit(UiEvent::FingerprintLocked(false));
         if self.cooling_shown.get() {
             self.emit(UiEvent::Info(String::new()));
+            // Every widget takes an empty info for a dropped conversation.
+            if let Some(prompt) = self.pending_prompt() {
+                self.emit(prompt);
+            }
         }
         self.sync_armed();
         self.release();
+    }
+
+    fn pending_prompt(&self) -> Option<UiEvent> {
+        match &*self.phase.borrow() {
+            Phase::Conversing { awaiting_input: true, asked_secret, asked, passive, .. } => {
+                Some(UiEvent::Prompt {
+                    secret: *asked_secret,
+                    text: asked.clone(),
+                    passive: *passive,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn say_cooling(&self) {
@@ -2762,6 +2783,69 @@ mod tests {
         let over = log.iter().position(|e| e == "locked false").expect("cool-down over");
         assert_eq!(log[over + 1], "info ", "{log:?}");
         assert_eq!(requests(&seen)[7], "cancel");
+    }
+
+    /// The cap reached, pam_fprintd gives up; a module asks something
+    /// visible, then the password.
+    fn miss_then_token(_: &str) -> Vec<Step> {
+        vec![
+            Step::Msg(Info, "Place your finger"),
+            Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+            Step::Msg(Info, "Verification timed out"),
+            Step::Msg(Visible, "Token:"),
+            Step::Msg(Secret, "Password:"),
+        ]
+    }
+
+    #[test]
+    fn a_cooldown_neither_covers_nor_ends_a_parked_visible_prompt() {
+        let (backend, seen, _) = scripted(miss_then_token);
+        let options = config::Auth { fingerprint_misses: 1, ..eager(0) };
+        let log = drive_with(backend, options, |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+            assert!(auth.cooling());
+            assert!(pump_until(pump, || !auth.cooling()));
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+            auth.submit("123456".into());
+            pump();
+            auth.submit("pw".into());
+            pump();
+        });
+        let token = log.iter().position(|e| e == "prompt[false,passive] Token:").expect("parked");
+        let answered = token + log[token..].iter().position(|e| e == "busy true").unwrap();
+        assert_eq!(log[token + 1..answered], ["locked false"], "{log:?}");
+        let requests = requests(&seen);
+        let ends = ["respond Some(\"123456\")", "respond Some(\"pw\")", "start true"];
+        assert_eq!(requests[requests.len() - ends.len()..], ends);
+    }
+
+    #[test]
+    fn a_cooldown_ending_over_a_parked_prompt_tells_it_again() {
+        let (backend, _, _) = scripted(|_| {
+            vec![
+                Step::Msg(Info, "Place your finger"),
+                Step::Msg(AuthMessageType::Error, "Failed to match fingerprint"),
+                Step::Msg(Info, "Verification timed out"),
+                Step::Msg(Secret, "One-time password:"),
+            ]
+        });
+        let options = config::Auth { fingerprint_misses: 1, ..eager(0) };
+        let log = drive_with(backend, options, |auth, pump| {
+            auth.set_cooldown(Duration::from_millis(300));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || auth.accepting_input() == AcceptState::Prompted));
+            assert!(auth.cooling());
+            assert!(pump_until(pump, || !auth.cooling()));
+            pump();
+            assert!(auth.accepting_input() == AcceptState::Prompted);
+        });
+        let parked = "prompt[true,passive] One-time password:";
+        let over = log.iter().position(|e| e == "locked false").expect("cool-down over");
+        assert_eq!(log[over - 2..over], [parked, LOCKED], "{log:?}");
+        assert_eq!(log[over..], ["locked false", "info ", parked], "{log:?}");
     }
 
     static ENDED_BEFORE_THE_END: AtomicUsize = AtomicUsize::new(0);

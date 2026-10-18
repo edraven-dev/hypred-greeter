@@ -486,8 +486,9 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.3):
   error occurred" or a timeout is no miss. `fingerprint-misses` (9: three
   conversations' worth) within `fingerprint-cooldown` seconds (600) start a
   cool-down that long: the window gets `.hg-fingerprint-locked`, the
-  message says `[texts] fingerprint-locked` (again after a park or a
-  username edit in it; `error-clear-ms` clears it like any error), nothing
+  message says `[texts] fingerprint-locked` (again after a park at a secret
+  prompt or a username edit in it — a visible prompt, such as an OTP's,
+  keeps its own text; `error-clear-ms` clears it like any error), nothing
   opens a conversation on its own — no timer, input, username edit or
   return to the VT arms the reader — and a login completed without a
   password prompt answered is refused. A scan already under way runs to its
