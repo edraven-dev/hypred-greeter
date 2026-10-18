@@ -71,7 +71,7 @@ greeter user's.
 |---|---|---|
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
-| `[gtk]` | `dark` (GTK's colour scheme, dark or light: the theme's variant — its `gtk-dark.css` or its media queries — and, from GTK 4.20, what `@media (prefers-color-scheme: dark)` in the stylesheet matches), `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (the scheme is then light, whatever `dark` or the desktop prefers: GTK has no Empty-dark and would load its Default theme in its place) | unset (GTK defaults) |
+| `[gtk]` | `dark` (GTK's colour scheme, dark or light: the theme's variant — its `gtk-dark.css` or its media queries — and, from GTK 4.20, what `@media (prefers-color-scheme: dark)` in the stylesheet matches), `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (GTK's scheme is then light, whatever `dark` or the desktop prefers: GTK has no Empty-dark and would load its Default theme in its place; the stylesheet's `@media (prefers-color-scheme: dark)` still matches with `dark = true`) | unset (GTK defaults) |
 | `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `30`, `400` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
@@ -210,11 +210,12 @@ class `.hg-<kind>` and (unless you set `name`) the name `#hg-<kind>`:
 GTK4 CSS supports `@define-color`, gradients, `alpha()`, borders, shadows,
 animations — see the [GTK CSS docs](https://docs.gtk.org/gtk4/css-properties.html).
 `@media (prefers-color-scheme: dark) { … }` (GTK 4.20 and later) follows
-`[gtk] dark`, or the desktop's colour scheme while `dark` is unset, so one
-stylesheet can carry a light and a dark look. `(prefers-contrast: more)`
-(4.20) and `(prefers-reduced-motion: reduce)` (4.22) follow GTK's settings
-of the same names (`gtk-interface-contrast`, `gtk-interface-reduced-motion`
-in the greeter user's settings.ini), as GTK's own theme does.
+`[gtk] dark` — or, while `dark` is unset and the theme is not Empty, the
+desktop's colour scheme — so one stylesheet can carry a light and a dark
+look. `(prefers-contrast: more)` (4.20) and
+`(prefers-reduced-motion: reduce)` (4.22) follow GTK's settings of the same
+names (`gtk-interface-contrast`, `gtk-interface-reduced-motion` in the
+greeter user's settings.ini), as GTK's own theme does.
 Parse errors are skipped, never fatal: each is logged and shown in the banner
 as `style.css:3:6: …` (the first five; the rest are counted). So are GTK's
 warnings about a block that is never used (an undefined `@media` feature) or

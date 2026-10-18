@@ -48,10 +48,10 @@ pub fn window_content(problems: &[String], root: gtk::Widget) -> gtk::Widget {
 }
 
 /// USER priority so the stylesheet wins over theme/application styles.
-pub fn load_css(path: &Path) -> Vec<String> {
+pub fn load_css(path: &Path, cfg: &config::Gtk) -> Vec<String> {
     let display = gtk::gdk::Display::default().expect("no display");
     let provider = gtk::CssProvider::new();
-    follow_settings(&gtk::Settings::for_display(&display), &provider);
+    follow_settings(&gtk::Settings::for_display(&display), &provider, sheet_scheme(cfg));
     // The callback runs inside load_from_path: the list is complete once
     // that returns. A re-parse after a scheme change only logs.
     let errors = Rc::new(RefCell::new(Some(Vec::new())));
@@ -97,12 +97,22 @@ pub fn load_css(path: &Path) -> Vec<String> {
 /// user's gtk.css only; a provider of our own left unbound never matches
 /// `@media (prefers-color-scheme: dark)` and the like. Bound before the
 /// load, so the sheet is parsed once.
-fn follow_settings(settings: &gtk::Settings, provider: &gtk::CssProvider) {
+fn follow_settings(settings: &gtk::Settings, provider: &gtk::CssProvider, scheme: Option<bool>) {
     for (setting, feature) in MEDIA_FEATURES {
-        if settings.find_property(setting).is_some() && provider.find_property(feature).is_some() {
+        let Some(pspec) = provider.find_property(feature) else { continue };
+        let own = scheme.filter(|_| feature == PREFERS_COLOR_SCHEME);
+        if let Some(value) = own.and_then(|dark| scheme_value(&pspec, dark)) {
+            provider.set_property_from_value(feature, &value);
+        } else if settings.find_property(setting).is_some() {
             settings.bind_property(setting, provider, feature).sync_create().build();
         }
     }
+}
+
+/// Under Empty GTK's own scheme stays light (see dark_scheme); the
+/// stylesheet still sees `dark`.
+fn sheet_scheme(cfg: &config::Gtk) -> Option<bool> {
+    (cfg.theme.as_deref() == Some("Empty")).then_some(cfg.dark == Some(true))
 }
 
 /// Syntax warnings GTK raises for what CSS allows, and applies anyway: a
@@ -553,6 +563,16 @@ mod tests {
         assert!(prefer_dark_too(false, (4, 18)));
         assert!(prefer_dark_too(false, (4, 24)), "the scheme could not be written");
         assert!(!prefer_dark_too(true, (5, 0)));
+    }
+
+    #[test]
+    fn under_empty_the_stylesheet_still_sees_dark() {
+        assert_eq!(sheet_scheme(&gtk(Some(true), Some("Empty"))), Some(true));
+        assert_eq!(sheet_scheme(&gtk(Some(false), Some("Empty"))), Some(false));
+        assert_eq!(sheet_scheme(&gtk(None, Some("Empty"))), Some(false));
+        assert_eq!(sheet_scheme(&gtk(Some(true), Some("adw-gtk3-dark"))), None);
+        assert_eq!(sheet_scheme(&gtk(Some(true), None)), None);
+        assert_eq!(sheet_scheme(&gtk(None, None)), None);
     }
 
     #[test]
