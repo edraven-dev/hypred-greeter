@@ -20,7 +20,8 @@
 //! sees a scan, so re-arming alone would make fingerprint tries unlimited:
 //! `fingerprint-misses` within `fingerprint-cooldown` start a cool-down in
 //! which the greeter opens nothing on its own and refuses a login no
-//! password was answered in.
+//! password was answered in. The same gate waits out an fprintd that can no
+//! longer claim the reader.
 
 use gtk4::glib;
 use std::cell::{Cell, RefCell};
@@ -54,6 +55,11 @@ const SEAT_POLL: Duration = Duration::from_secs(1);
 /// pam_fprintd's text for a scan that did not match. Never translated:
 /// greetd's PAM worker runs without setlocale.
 const MISSED: &str = "Failed to match fingerprint";
+/// Passive conversations in a row that park without a word from
+/// pam_fprintd before fprintd is waited out.
+const INSTANT_PARKS: u32 = 3;
+/// fprintd exits 30 s after its last client; the next one starts clean.
+const WAIT_OUT: Duration = Duration::from_secs(31);
 const SLEEP_PIECE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A GLib timeout is u32 milliseconds (49.7 days): a longer wait would
@@ -134,6 +140,10 @@ pub struct Auth {
     cooling: Cell<bool>,
     /// The cool-down text is the last thing shown, as far as auth can tell.
     cooling_shown: Cell<bool>,
+    /// Passive conversations in a row that parked without any info.
+    instant_parks: Cell<u32>,
+    wait_out: Cell<Duration>,
+    waiting_out: Cell<bool>,
     hooks: Hooks,
 }
 
@@ -184,6 +194,9 @@ impl Auth {
             misses: RefCell::default(),
             cooling: Cell::new(false),
             cooling_shown: Cell::new(false),
+            instant_parks: Cell::new(0),
+            wait_out: Cell::new(WAIT_OUT),
+            waiting_out: Cell::new(false),
             hooks,
         });
 
@@ -672,6 +685,7 @@ impl Auth {
                 if let Phase::Conversing { saw_info, .. } = &mut *self.phase.borrow_mut() {
                     *saw_info = true;
                 }
+                self.instant_parks.set(0);
                 self.emit(UiEvent::Info(text));
                 self.send(Request::PostAuthMessageResponse { response: None });
             }
@@ -688,27 +702,61 @@ impl Auth {
     }
 
     fn await_input(&self, secret: bool, text: String) {
-        let passive = match &mut *self.phase.borrow_mut() {
-            Phase::Conversing { awaiting_input, passive, asked_secret, .. } => {
+        let (passive, instant) = match &mut *self.phase.borrow_mut() {
+            Phase::Conversing { awaiting_input, passive, asked_secret, saw_info, .. } => {
                 *awaiting_input = true;
                 *asked_secret = secret;
-                *passive
+                (*passive, !*saw_info)
             }
-            _ => false,
+            _ => (false, false),
         };
         self.sync_armed();
         self.emit(UiEvent::Busy(false));
         self.emit(UiEvent::Prompt { secret, text, passive });
         if passive {
+            if instant {
+                self.note_instant_park();
+            }
             self.remind_cooling();
             self.maybe_rearm();
         }
     }
 
+    /// fprintd 1.94.5 + libfprint 1.94.100: a Release while the reader is
+    /// suspended (the lid closed mid-scan) leaves the device open, and every
+    /// Claim fails at once until fprintd exits, 30 s after its last client —
+    /// which every retry and every input-driven re-arm is. Such parks look
+    /// like a reader claimed elsewhere or a user without prints; a few in a
+    /// row hold every passive open past that exit, once.
+    fn note_instant_park(&self) {
+        let parks = self.instant_parks.get() + 1;
+        if parks < INSTANT_PARKS {
+            return self.instant_parks.set(parks);
+        }
+        self.instant_parks.set(0);
+        self.waiting_out.set(true);
+        let wait = self.wait_out.get();
+        info!(
+            "{parks} conversations in a row asked for the password at once: \
+             opening none for {} s, so a stuck fprintd can exit",
+            wait.as_secs()
+        );
+        let me = self.me.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(wait).await;
+            if let Some(auth) = me.upgrade() {
+                auth.waiting_out.set(false);
+                info!("waited fprintd out; re-arming as usual");
+                auth.release();
+            }
+        });
+    }
+
     /// The one gate every passive open passes: shut through a fingerprint
-    /// cool-down. A parked prompt stays parked, ready for a password.
+    /// cool-down and while fprintd is waited out. A parked prompt stays
+    /// parked, ready for a password.
     fn held(&self) -> bool {
-        self.cooling.get()
+        self.cooling.get() || self.waiting_out.get()
     }
 
     /// The gate opened again: what it held goes on as it would have.
@@ -866,14 +914,19 @@ impl Auth {
         self.cooldown.set(cooldown);
     }
 
+    #[cfg(test)]
+    fn set_wait_out(&self, wait_out: Duration) {
+        self.wait_out.set(wait_out);
+    }
+
     /// Input that reaches nothing but the activity clock.
     #[cfg(test)]
     fn touch_activity_clock(&self) {
         self.last_activity.set(Instant::now());
     }
 
-    /// Ages the running conversation and the last activity, so tests reach
-    /// the re-arm guards without sleeping.
+    /// Ages the running conversation, the last activity and the last
+    /// restart, so tests reach the re-arm guards without sleeping.
     #[cfg(test)]
     fn backdate(&self, by: Duration) {
         if let Phase::Conversing { started, .. } = &mut *self.phase.borrow_mut() {
@@ -881,6 +934,8 @@ impl Auth {
         }
         let activity = self.last_activity.get();
         self.last_activity.set(activity.checked_sub(by).unwrap_or(activity));
+        let restart = self.last_restart.get();
+        self.last_restart.set(restart.map(|at| at.checked_sub(by).unwrap_or(at)));
     }
 }
 
@@ -1372,6 +1427,7 @@ mod tests {
         let (backend, seen, _) = scripted(password_only);
         drive_with(backend, eager(10), |auth, pump| {
             auth.set_retry(FAST, FAST * 4);
+            auth.set_wait_out(FAST);
             auth.start_eager("edraven");
             assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
             pump();
@@ -1385,6 +1441,7 @@ mod tests {
         let (backend, seen, _) = scripted(password_only);
         drive_with(backend, eager_always(), |auth, pump| {
             auth.set_retry(FAST, FAST * 2);
+            auth.set_wait_out(FAST);
             auth.start_eager("edraven");
             assert!(pump_until(pump, || creates(&seen) >= 8), "{:?}", requests(&seen));
         });
@@ -1515,6 +1572,7 @@ mod tests {
         let (backend, seen, _) = scripted(password_only);
         drive_with(backend, eager(10), |auth, pump| {
             auth.set_retry(FAST, FAST);
+            auth.set_wait_out(FAST);
             auth.start_eager("edraven");
             assert!(pump_until(pump, || creates(&seen) == 1 + RETRY_LIMIT as usize));
             pump();
@@ -1917,27 +1975,136 @@ mod tests {
         }
     }
 
+    const HOLD: Duration = Duration::from_millis(600);
+
+    /// Pumps for a while, checking that nothing opens meanwhile.
+    fn nothing_opens_for(pump: &dyn Fn(), seen: &Seen, wait: Duration) {
+        let (since, opened) = (Instant::now(), creates(seen));
+        while since.elapsed() < wait {
+            pump();
+            assert_eq!(creates(seen), opened, "{:?}", requests(seen));
+        }
+    }
+
     #[test]
-    fn a_reader_that_never_arms_again_is_retried_forever_at_six_seconds() {
-        STUCK_CONVERSATIONS.store(0, Ordering::SeqCst);
-        let (backend, seen, _) = scripted(suspended_then_stuck);
-        // fprintd exits only after 30 s without a client: every retry of a
-        // stuck reader comes within 6 s and keeps it alive.
+    fn a_wedged_reader_is_waited_out_and_retried() {
+        // Every retry of a stuck reader comes within 6 s and would keep
+        // fprintd, which exits 30 s after its last client, alive for good.
         drive_with(Box::new(DemoBackend::new()), eager_always(), |auth, _| {
             let real: Vec<_> = (0..40).map(|n| auth.retry_delay(n, false)).collect();
             assert!(real.iter().all(|d| *d <= Duration::from_secs(6)), "{real:?}");
         });
+        assert!(WAIT_OUT > Duration::from_secs(30));
+        STUCK_CONVERSATIONS.store(0, Ordering::SeqCst);
+        let (backend, seen, _) = scripted(suspended_then_stuck);
         let log = drive_with(backend, eager_always(), |auth, pump| {
-            auth.set_retry(Duration::from_millis(2), Duration::from_millis(2));
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
             auth.start_eager("edraven");
-            auth.backdate(Duration::from_secs(2));
-            assert!(pump_until(pump, || creates(&seen) >= 12), "{:?}", requests(&seen));
-            assert!(auth.quick_ends.get() >= 10, "{}", auth.quick_ends.get());
+            // The cut-short cycle, then three parks at once.
+            assert!(pump_until(pump, || creates(&seen) == 4), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, HOLD / 2);
+            assert_eq!(auth.instant_parks.get(), 0, "the next hold takes three more");
+            assert!(pump_until(pump, || creates(&seen) == 7), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, HOLD / 2);
         });
-        // Every retry flashes .hg-armed although nothing was ever armed.
-        let armed = log.iter().filter(|e| *e == "armed true").count();
-        assert!(armed >= 12, "{log:?}");
         assert_eq!(log.iter().filter(|e| e.starts_with("info Place")).count(), 1, "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked")), "{log:?}");
+    }
+
+    #[test]
+    fn three_instant_parks_hold_every_passive_open_then_retry() {
+        let (backend, seen, _) = scripted(password_only);
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            auth.backdate(RESTART_COOLDOWN);
+            auth.note_activity();
+            nothing_opens_for(pump, &seen, HOLD / 2);
+            // Retried after it, and held again after three more.
+            assert!(pump_until(pump, || creates(&seen) == 6), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, HOLD / 2);
+        });
+        let quiet = |e: &String| !e.starts_with("locked") && !e.starts_with("pamerror");
+        assert!(log.iter().all(quiet), "{log:?}");
+    }
+
+    #[test]
+    fn a_username_edit_during_the_wait_out_opens_after_it() {
+        let (backend, seen, _) = scripted(password_only);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(HOLD);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            show("bob");
+            auth.start_eager("bob");
+            nothing_opens_for(pump, &seen, HOLD / 2);
+            assert!(pump_until(pump, || creates(&seen) >= 4), "{:?}", requests(&seen));
+        });
+        let three = ["create edraven", "cancel", "create edraven", "cancel", "create edraven"];
+        let expected = [&three[..], &["cancel", "create bob"]].concat();
+        assert_eq!(requests(&seen)[..expected.len()], expected);
+    }
+
+    #[test]
+    fn the_wait_out_refuses_no_login() {
+        let (backend, seen, gate) = scripted(|user| match user {
+            "touchy" => vec![Step::Msg(Info, "Place your finger"), Step::Wait],
+            _ => password_only(user),
+        });
+        let log = drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 3), "{:?}", requests(&seen));
+            show("touchy");
+            auth.start_eager("touchy");
+            auth.submit("pw".into());
+            pump();
+            gate.release();
+            pump();
+        });
+        let requests = requests(&seen);
+        let ends = ["cancel", "create touchy", "respond None", "start true"];
+        assert_eq!(requests[requests.len() - ends.len()..], ends);
+        assert!(log.contains(&"info demo: session would start now".to_string()), "{log:?}");
+        assert!(!log.iter().any(|e| e.starts_with("locked") || e == LOCKED), "{log:?}");
+    }
+
+    static RUN_BROKEN_BY_INFO: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn fingerprint_info_ends_a_run_of_instant_parks_and_input_does_not() {
+        RUN_BROKEN_BY_INFO.store(0, Ordering::SeqCst);
+        let (backend, seen, _) =
+            scripted(|user| match RUN_BROKEN_BY_INFO.fetch_add(1, Ordering::SeqCst) {
+                2 => fprint_cut_short(user),
+                _ => password_only(user),
+            });
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(Duration::from_secs(60));
+            auth.start_eager("edraven");
+            assert!(pump_until(pump, || creates(&seen) == 6), "{:?}", requests(&seen));
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
+
+        let (backend, seen, gate) = scripted(|_| vec![Step::Wait, Step::Msg(Secret, "Password:")]);
+        drive_with(backend, eager_always(), |auth, pump| {
+            auth.set_retry(FAST, FAST);
+            auth.set_wait_out(Duration::from_secs(60));
+            auth.start_eager("edraven");
+            for conversation in 1..=3 {
+                let opened = pump_until(pump, || creates(&seen) == conversation);
+                assert!(opened, "{:?}", requests(&seen));
+                auth.backdate(RESTART_COOLDOWN);
+                auth.note_activity();
+                gate.release();
+            }
+            nothing_opens_for(pump, &seen, Duration::from_millis(100));
+        });
     }
 
     static CRASHES: AtomicUsize = AtomicUsize::new(0);

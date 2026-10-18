@@ -374,7 +374,16 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   because the reader was claimed elsewhere or not up yet — is reopened by
   timer, so a touch works again without any input: after 3 s, doubling up
   to 60 s, three tries; under `"always"` without a limit, and a busy reader
-  is retried every 6 s at most. None of these timers run with `0`.
+  is retried every 6 s at most. None of these timers run with `0`. Three
+  parks in a row before pam_fprintd said anything — the reader claimed
+  elsewhere, a user without prints, or an fprintd that can no longer claim
+  the reader after the lid was closed mid-scan (fprintd 1.94.5 with
+  libfprint 1.94.100 leaves the device open when it is released while
+  suspended, and every claim fails until the daemon exits) — make the
+  greeter open nothing on its own for 31 s: fprintd exits 30 s after its
+  last client, every retry and re-arm is one, and the next daemon starts
+  clean. A parked prompt still takes a password meanwhile; then the
+  retries go on as above, and the next three such parks pause them again.
 - **Failed scans are capped.** pam_fprintd gives a conversation `max-tries`
   scans (3) and then hands over to the password, but every re-arm is a
   fresh conversation and `pam_faillock` never sees a scan (pam_fprintd is
@@ -450,7 +459,9 @@ config and `USER=touch` (a login with nothing pressed) or `USER=fprint`
 (a timed-out cycle; add `rearm-window = "always"` to watch it re-arm), or
 `USER=miss` (three misses per conversation: under `"always"` the third
 conversation starts the cool-down and `.hg-fingerprint-locked`;
-`fingerprint-misses = 3` makes it the first).
+`fingerprint-misses = 3` makes it the first). Any other name parks at once:
+the third park in a row starts the 31 s wait, which the log on stderr
+shows.
 
 ## Development
 
