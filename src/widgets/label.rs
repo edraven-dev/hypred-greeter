@@ -295,6 +295,7 @@ impl WidgetDef for LabelDef {
             | UiEvent::AuthError(_)
             | UiEvent::Busy(_)
             | UiEvent::Armed(_)
+            | UiEvent::FingerprintLocked(_)
             | UiEvent::Starting
             | UiEvent::Focus(_) => {}
         });

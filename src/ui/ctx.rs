@@ -290,6 +290,13 @@ mod tests {
     }
 
     #[test]
+    fn the_fingerprint_lock_toggles_its_window_class() {
+        let changes = |locked| crate::ui::state_changes(&UiEvent::FingerprintLocked(locked));
+        assert_eq!(changes(true), [("hg-fingerprint-locked", true)]);
+        assert_eq!(changes(false), [("hg-fingerprint-locked", false)]);
+    }
+
+    #[test]
     fn a_username_edit_announces_itself_then_snaps_the_session() {
         let mut state = State::default();
         state.last_session.insert("bob".into(), "wayland/hyprland-uwsm".into());

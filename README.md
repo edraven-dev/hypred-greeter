@@ -40,6 +40,11 @@ or inside a dedicated Hyprland config, run `hypred-greeter` from the
 compositor and tear the compositor down when it exits (greetd starts the
 chosen session only after the greeter command exits).
 
+Either way its log is in the journal: `journalctl -t hypred-greeter`. The
+greeter writes stderr, and when that is not the journal already — a
+compositor's `exec` hands it `/dev/null`, greetd a VT — it sends each line,
+GTK's warnings included, to journald itself (`--demo` writes stderr only).
+
 ## Configuration
 
 Everything lives in `/etc/greetd/hypred-greeter/` (override with
@@ -72,10 +77,10 @@ greeter user's.
 | `[paths]` | `layout`, `style` | `layout.toml`, `style.css` |
 | `[background]` | `image`, `fit` (`cover`/`contain`/`fill`/`scale-down`) | none, `cover` |
 | `[gtk]` | `dark` (GTK's colour scheme, dark or light: the theme's variant — its `gtk-dark.css` or its media queries — and, from GTK 4.20, what `@media (prefers-color-scheme: dark)` in the stylesheet matches), `theme`, `icon-theme`, `cursor-theme`, `font`; blank slate: `theme = "Empty"` — the stylesheet owns 100 % of the look (GTK's scheme is then light, whatever `dark` or the desktop prefers: GTK has no Empty-dark and would load its Default theme in its place; the stylesheet's `@media (prefers-color-scheme: dark)` still matches with `dark = true`) | unset (GTK defaults) |
-| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens) | `false`, `0`, unset, `30`, `400` |
+| `[auth]` | `eager` (open the PAM conversation before anything is typed), `rearm-window` (seconds after the last input, or `"always"`: keep re-arming the reader — see [Fingerprint](#fingerprint-pam_fprintd)), `user` (the username shown when nothing is remembered; lets a layout leave the `username` widget out), `typing-hold` (seconds text left in the password entry keeps a parked prompt ready), `username-debounce-ms` (how long the username entry settles before an eager conversation opens), `fingerprint-misses` (fingerprint scans that fail to match within `fingerprint-cooldown` seconds before a cool-down that long — see [Fingerprint](#fingerprint-pam_fprintd); `0`: no cap), `fingerprint-cooldown` (seconds a miss is remembered and a cool-down lasts; `0`: no cap) | `false`, `0`, unset, `30`, `400`, `9`, `600` |
 | `[commands]` | a map: any `name = [argv]` — `reboot` and `poweroff` are the power widget's, a `button` runs any of them by name (`action = "suspend"`); a user table adds to and overrides the defaults, never removes one | `reboot`/`poweroff` = `["systemctl", ...]` |
 | `[sessions]` | `x11-prefix` (argv), `env` (KEY=value list), `default` (session id preselected for a user with nothing remembered, e.g. `"wayland/hyprland-uwsm"`), `only` / `hide` / `order` (id lists: keep just these / drop these / list these first, the rest follow by name), `x11-suffix` (appended to X11 sessions' names), `[sessions.names]` (`"<id>" = "Display name"`; a renamed X11 session gets no suffix) | `["startx", "/usr/bin/env"]`, `[]`, first by name, `[]`, `[]`, `[]`, `" (X11)"`, `{}` |
-| `[texts]` | `enter-username`, `username-changed`, `auth-failed` (when greetd's error has no text), `power-failed` (`{program}`, `{error}`); `[[texts.rewrite]]` entries — see below | the built-in English strings |
+| `[texts]` | `enter-username`, `username-changed`, `auth-failed` (when greetd's error has no text), `power-failed` (`{program}`, `{error}`), `fingerprint-locked` (shown during a fingerprint cool-down, and for a login refused in one); `[[texts.rewrite]]` entries — see below | the built-in English strings |
 
 A key the greeter does not know (a typo like `rearm_window`) keeps its
 default in force and is named in the on-screen banner. An id in
@@ -257,7 +262,8 @@ message label:
 | `.hg-busy` | a submitted password is on its way |
 | `.hg-failed` | after an auth error or a PAM error message: for at least 1.5 s, then until the next prompt, info message, re-arm, submission or a message widget's `error-clear-ms`; every failure drops it for a frame first, so an `animation:` on it restarts on every failure |
 | `.hg-info` | the latest thing PAM said was an info message ("Place your finger …") — flips with the event; the label follows after `settle-ms`, with `.hg-message-info` |
-| `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in |
+| `.hg-armed` | a passive (eager) conversation is open with nothing submitted: the reader is armed, a touch alone logs in (never while `.hg-fingerprint-locked`) |
+| `.hg-fingerprint-locked` | a fingerprint cool-down: for `fingerprint-cooldown` seconds after too many misses nothing arms the reader on its own and a login without a password is refused — see [Fingerprint](#fingerprint-pam_fprintd) |
 | `.hg-starting` | the session is being started: under greetd until the greeter exits, a round trip later (too soon for a transition to show); in `--demo`, where nothing starts, until the next attempt (a submission, re-arm or prompt), so a theme can preview it; a failed start drops it |
 | `.hg-caps-lock` | Caps Lock is on |
 | `.hg-demo` | running with `--demo` |
@@ -318,8 +324,9 @@ possible later without breaking existing widgets.
   via the message widget. Try it: `--demo`, username `mfa` (visible OTP
   prompt + info), username `fprint` (a fingerprint cycle: two info messages
   around a 3 s blocking wait, then the password prompt), username `touch`
-  (the same cycle ending in a match), and password `fail` for the error
-  path.
+  (the same cycle ending in a match), username `miss` (three scans that
+  fail to match, then the password prompt), and password `fail` for the
+  error path.
 - **Two kinds of error**: a PAM error message mid-conversation ("Failed to
   match fingerprint") is `PamError` — shown in red for at least 1.5 s
   (`error-hold-ms`), the entry is left alone, the conversation goes on. Only a failed conversation
@@ -377,7 +384,8 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
 - **Only a fresh conversation re-arms the reader.** After its timeout
   pam_fprintd gives up and the conversation parks at the password prompt;
   `rearm-window` says when a parked conversation is restarted:
-  - `"always"` — after every timed-out cycle, for as long as the greeter is
+  - `"always"` — after every cycle that ran out (timed out, or pam_fprintd's
+    `max-tries` misses — capped, below), for as long as the greeter is
     up: a touch logs in whenever you walk up. The price is one PAM worker
     per pam_fprintd `timeout=` and the journal lines of each cancelled
     prompt (below), for as long as nobody logs in.
@@ -398,6 +406,61 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   timer, so a touch works again without any input: after 3 s, doubling up
   to 60 s, three tries; under `"always"` without a limit, and a busy reader
   is retried every 6 s at most. None of these timers run with `0`.
+- **A reader that never gets to wait is waited out.** Three passive
+  conversations in a row for one name that reach a prompt without a
+  fingerprint wait (nothing said first, or the prompt within a second of
+  opening: pam_faillock's lock notice is no wait) hold every re-arm for
+  31 s: no timer, input, username edit or return to the VT opens a
+  conversation meanwhile. The reader claimed elsewhere and a user without
+  prints look like that, and so does an fprintd that can no longer claim
+  the reader after the lid was closed mid-scan (fprintd 1.94.5 with
+  libfprint 1.94.100 leaves the device open when it is released while
+  suspended, and every claim fails until the daemon exits): fprintd exits
+  30 s after its last client, every re-arm is one, and the next daemon
+  starts clean. A parked prompt still takes a password, nothing is refused
+  and nothing is shown (the log says it); then the retries go on as above,
+  and the next three such parks hold them again. A run is one name's, so
+  the names typed on the way to a username do not add up; but a remembered
+  user without prints keeps an `"always"` greeter in this hold most of the
+  time, and a name typed during it gets the reader only when it ends.
+- **Failed scans are capped.** pam_fprintd gives a conversation `max-tries`
+  scans (3) and then hands over to the password, but every re-arm is a
+  fresh conversation and `pam_faillock` never sees a scan (pam_fprintd is
+  `sufficient` ahead of it), so the tries alone would be unlimited. The
+  greeter counts pam_fprintd's "Failed to match fingerprint" in every
+  conversation, on the text as PAM sent it (greetd's PAM worker never
+  translates it; `[[texts.rewrite]]` rules change what is shown, not what
+  counts) — a retry request ("Swipe was too short, try again"), "An unknown
+  error occurred" or a timeout is no miss. `fingerprint-misses` (9: three
+  conversations' worth) within `fingerprint-cooldown` seconds (600) start a
+  cool-down that long: the window gets `.hg-fingerprint-locked`, the
+  message says `[texts] fingerprint-locked` (again after a park or a
+  username edit in it; `error-clear-ms` clears it like any error), nothing
+  opens a conversation on its own — no timer, input, username edit or
+  return to the VT arms the reader — and a login completed without a
+  password prompt answered is refused. A scan already under way runs to its
+  end (greetd passes nothing on while pam_fprintd waits), so "Place your
+  finger" can still show; a match there is refused too. A miss is forgotten
+  `fingerprint-cooldown` seconds after it came and misses during a
+  cool-down are not counted, so every cool-down ends with none. The count
+  belongs to the greeter process and every name typed into it: a new
+  greeter (after a logout or a reboot) or the one on another VT starts from
+  none. When a cool-down ends, what it held goes on as `rearm-window` has
+  it: a parked prompt re-arms under `"always"`, under `N` if there was
+  input in the last N s (else at the next input), not under `0`; anything
+  else held — a username edit, a failed or refused login — opens at once
+  (at the next input under `0`).
+- **A cool-down leaves the password working.** A prompt already parked
+  takes it at once. Otherwise PAM's order holds: a submitted password still
+  runs pam_fprintd first, which arms the reader up to its `timeout=` before
+  the password is asked for; a touch there is refused, and the password
+  goes into one new conversation (pam_fprintd's wait included). When that
+  one is refused as well (touched again), or no scan came before the
+  refused login (a stack that lets the user in without asking, like a blank
+  password under `nullok`: no way in during a cool-down), the password is
+  dropped — type it again. So the cap bounds the greeter's own re-arming,
+  not someone at the keyboard: every password submission runs
+  pam_fprintd's scans, cool-down or not.
 - **Eager mode cancels PAM prompts — carry the right stack before enabling
   it.** Every restart, username change and Escape on a half-answered
   prompt drops a conversation that may sit at the password prompt. pam_unix
@@ -441,13 +504,19 @@ What to expect, and why (greetd 0.10.3, pam_fprintd 1.94.5, Linux-PAM 1.7.2):
   prompt (an OTP mid-way, whose text is then cleared); on a parked prompt
   it is just input (see above). **Enter on an empty entry** submits
   nothing. After a failed login the reader re-arms on your next input or
-  (unless `rearm-window = 0`) after 3 s, so the error stays readable. An answer typed for a
+  (unless `rearm-window = 0`) after 3 s, so the error stays readable (in a
+  wait-out or a cool-down: once it is over, above). An answer typed for a
   second-stage prompt is never reused as a password if the username
   changed meanwhile.
 
 Try the flow without hardware: `--demo` with `[auth] eager = true` in the
 config and `USER=touch` (a login with nothing pressed) or `USER=fprint`
-(a timed-out cycle; add `rearm-window = "always"` to watch it re-arm).
+(a timed-out cycle; add `rearm-window = "always"` to watch it re-arm), or
+`USER=miss` (three misses per conversation: under `"always"` the third
+conversation starts the cool-down and `.hg-fingerprint-locked`;
+`fingerprint-misses = 3` makes it the first). Under `"always"` any other
+name parks at once and is retried: the third park in a row starts the 31 s
+wait-out, which the log on stderr shows.
 
 ## Development
 

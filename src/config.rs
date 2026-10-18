@@ -85,6 +85,10 @@ pub struct Auth {
     /// How long the username entry has to settle before an eager
     /// conversation opens for the name typed.
     pub username_debounce_ms: u64,
+    /// Misses within `fingerprint_cooldown` seconds that start a cool-down
+    /// that long; 0 in either: no cap.
+    pub fingerprint_misses: u32,
+    pub fingerprint_cooldown: u64,
 }
 
 impl Default for Auth {
@@ -95,6 +99,8 @@ impl Default for Auth {
             user: None,
             typing_hold: 30,
             username_debounce_ms: 400,
+            fingerprint_misses: 9,
+            fingerprint_cooldown: 600,
         }
     }
 }
@@ -215,6 +221,7 @@ pub struct Texts {
     pub auth_failed: String,
     /// `{program}` and `{error}` are filled in.
     pub power_failed: String,
+    pub fingerprint_locked: String,
     pub rewrite: Vec<Rewrite>,
 }
 
@@ -225,6 +232,7 @@ impl Default for Texts {
             username_changed: "username changed — enter the password again".into(),
             auth_failed: "authentication failed".into(),
             power_failed: "{program}: {error}".into(),
+            fingerprint_locked: "too many fingerprint attempts — use your password".into(),
             rewrite: vec![],
         }
     }
@@ -556,6 +564,34 @@ mod tests {
         assert_eq!(config.auth.typing_hold, 5);
         assert_eq!(config.auth.username_debounce_ms, 0);
         assert!(parse("[auth]\ntyping-hold = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_fingerprint_cap_defaults_and_parses() {
+        let config = parse("").unwrap().0;
+        assert_eq!(config.auth.fingerprint_misses, 9);
+        assert_eq!(config.auth.fingerprint_cooldown, 600);
+        let locked = "too many fingerprint attempts — use your password";
+        assert_eq!(config.texts.fingerprint_locked, locked);
+        let text = "[auth]\nfingerprint-misses = 0\nfingerprint-cooldown = 30\n\
+                    [texts]\nfingerprint-locked = \"nope\"\n";
+        let (config, unknown) = parse(text).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(config.auth.fingerprint_misses, 0);
+        assert_eq!(config.auth.fingerprint_cooldown, 30);
+        assert_eq!(config.texts.fingerprint_locked, "nope");
+        assert!(parse("[auth]\nfingerprint-misses = -1\n").is_err());
+        assert!(parse("[auth]\nfingerprint-cooldown = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_shipped_config_documents_the_fingerprint_cap_defaults() {
+        let (config, unknown) = parse(include_str!("../data/config.toml")).unwrap();
+        assert!(unknown.is_empty(), "{unknown:?}");
+        let (shipped, default) = (config.auth, Auth::default());
+        assert_eq!(shipped.fingerprint_misses, default.fingerprint_misses);
+        assert_eq!(shipped.fingerprint_cooldown, default.fingerprint_cooldown);
+        assert_eq!(config.texts.fingerprint_locked, Texts::default().fingerprint_locked);
     }
 
     #[test]

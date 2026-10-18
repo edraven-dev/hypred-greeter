@@ -198,6 +198,7 @@ impl WidgetDef for MessageDef {
                 UiEvent::Busy(_)
                 | UiEvent::SessionChanged(_)
                 | UiEvent::Armed(_)
+                | UiEvent::FingerprintLocked(_)
                 | UiEvent::Starting
                 | UiEvent::Focus(_)
                 | UiEvent::UsernameChanged(_) => {}
