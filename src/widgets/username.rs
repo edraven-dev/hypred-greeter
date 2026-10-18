@@ -11,9 +11,11 @@ use crate::widgets::{apply_entry_props, containers, WidgetDef, WidgetError};
 
 pub struct UsernameDef;
 
-enum Picker {
-    Dropdown,
-    Buttons(gtk::Orientation, i32),
+#[derive(Debug, PartialEq)]
+enum Choice {
+    Entry,
+    Dropdown(Vec<String>),
+    Buttons(Vec<String>, gtk::Orientation, i32),
 }
 
 impl WidgetDef for UsernameDef {
@@ -21,8 +23,24 @@ impl WidgetDef for UsernameDef {
         "username"
     }
 
+    /// Never fails: without this widget nothing may name a user, and a
+    /// placeholder in its place would make login impossible.
     fn build(&self, ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-        let widget = styled(ctx, node)?;
+        let (choice, unusable) = choose(node, &ctx.app.username(), users::discover);
+        if let Some(why) = unusable {
+            ctx.problem(format!("{} (username): {why}; an entry instead", node.path));
+        }
+        let picker = choice != Choice::Entry;
+        let widget = match choice {
+            Choice::Entry => entry(ctx, node),
+            Choice::Dropdown(names) => dropdown(ctx, names),
+            Choice::Buttons(names, orientation, spacing) => {
+                buttons(ctx, names, orientation, spacing)
+            }
+        };
+        if picker {
+            widget.set_sensitive(!ctx.config.auth.fixed_user);
+        }
         // GTK marks neither a read-only entry nor its text node.
         if ctx.config.auth.fixed_user {
             widget.add_css_class("hg-username-fixed");
@@ -31,42 +49,68 @@ impl WidgetDef for UsernameDef {
     }
 }
 
-fn styled(ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
-    let picker = match node.props.str_or("style", "entry")?.as_str() {
-        "entry" => return entry(ctx, node),
-        "dropdown" => Picker::Dropdown,
-        "buttons" => Picker::Buttons(
+/// What `node` becomes: a picker it cannot build is an entry, with the
+/// reason.
+fn choose(
+    node: &Node,
+    shown: &str,
+    local_users: impl FnOnce() -> Vec<String>,
+) -> (Choice, Option<WidgetError>) {
+    match requested(node, shown, local_users) {
+        Ok(choice) => (choice, None),
+        Err(why) => {
+            // Read, so the sweep for typos does not call them unknown.
+            let _ = (node.props.str_list("users"), node.props.str("orientation"));
+            let _ = node.props.int("spacing");
+            (Choice::Entry, Some(why))
+        }
+    }
+}
+
+fn requested(
+    node: &Node,
+    shown: &str,
+    local_users: impl FnOnce() -> Vec<String>,
+) -> Result<Choice, WidgetError> {
+    let buttons = match node.props.str_or("style", "entry")?.as_str() {
+        "entry" => return Ok(Choice::Entry),
+        "dropdown" => None,
+        "buttons" => Some((
             containers::parse_orientation(&node.props, "horizontal")?,
             node.props.int("spacing")?.unwrap_or(0) as i32,
-        ),
+        )),
         other => {
             return Err(WidgetError::Other(format!(
                 "`style`: unknown style `{other}` (entry, dropdown, buttons)"
             )))
         }
     };
-    let users = node.props.str_list("users")?.unwrap_or_else(users::discover);
-    let names = users::pickable(users, &ctx.app.username());
+    let users = node.props.str_list("users")?.unwrap_or_else(local_users);
+    let names = users::pickable(users, shown);
     if names.is_empty() {
-        // Nothing else could name a user: login has to stay possible.
-        ctx.problem(format!("{} (username): no user to pick from, an entry instead", node.path));
-        return entry(ctx, node);
+        return Err(WidgetError::Other("no user to pick from".into()));
     }
-    let widget = match picker {
-        Picker::Dropdown => dropdown(ctx, names),
-        Picker::Buttons(orientation, spacing) => buttons(ctx, names, orientation, spacing),
-    };
-    widget.set_sensitive(!ctx.config.auth.fixed_user);
-    Ok(widget)
+    Ok(match buttons {
+        None => Choice::Dropdown(names),
+        Some((orientation, spacing)) => Choice::Buttons(names, orientation, spacing),
+    })
 }
 
-fn entry(ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
+/// A prop it cannot use is skipped: the entry stays.
+fn entry(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
     let entry = gtk::Entry::builder()
-        .placeholder_text(node.props.str_or("placeholder", "username")?)
+        .placeholder_text("username")
         .text(ctx.app.username())
         .editable(!ctx.config.auth.fixed_user)
         .build();
-    apply_entry_props(&entry, node)?;
+    let placeholder = node.props.str("placeholder");
+    if let Ok(Some(text)) = &placeholder {
+        entry.set_placeholder_text(Some(text));
+    }
+    let aligned = apply_entry_props(&entry, node);
+    for skipped in [placeholder.err(), aligned.err()].into_iter().flatten() {
+        ctx.problem(format!("{} (username): {skipped}", node.path));
+    }
 
     let app = ctx.app.clone();
     entry.connect_changed(move |entry| {
@@ -105,7 +149,7 @@ fn entry(ctx: &BuildCtx, node: &Node) -> Result<gtk::Widget, WidgetError> {
             | UiEvent::Starting => {}
         }
     });
-    Ok(entry.upcast())
+    entry.upcast()
 }
 
 fn position(names: &[String], name: &str) -> Option<usize> {
@@ -243,6 +287,55 @@ fn buttons(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(props: &str) -> Node {
+        let text = format!("[root]\nwidget = \"username\"\n{props}\n");
+        crate::layout::parse_str(&text, &mut Vec::new()).unwrap()
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn local() -> Vec<String> {
+        names(&["fprint", "touch"])
+    }
+
+    /// `choose` on a node with `props`, the reason as text.
+    fn chosen(props: &str, shown: &str) -> (Choice, Option<String>) {
+        let (choice, unusable) = choose(&node(props), shown, local);
+        (choice, unusable.map(|why| why.to_string()))
+    }
+
+    #[test]
+    fn a_style_picks_an_entry_or_a_picker_of_the_users_and_the_one_shown() {
+        assert_eq!(chosen("", ""), (Choice::Entry, None));
+        let dropdown = Choice::Dropdown(names(&["fprint", "touch", "mfa"]));
+        assert_eq!(chosen("style = \"dropdown\"", "mfa"), (dropdown, None));
+        let props = "style = \"buttons\"\nusers = [\"a\"]\norientation = \"v\"\nspacing = 4";
+        let buttons = Choice::Buttons(names(&["a"]), gtk::Orientation::Vertical, 4);
+        assert_eq!(chosen(props, ""), (buttons, None));
+    }
+
+    #[test]
+    fn a_picker_that_cannot_be_built_is_an_entry() {
+        for (props, fragment) in [
+            ("style = \"dropdwn\"\nusers = [\"a\"]", "unknown style `dropdwn`"),
+            ("style = 1", "`style` expects a string"),
+            ("style = \"dropdown\"\nusers = \"fprint\"", "`users` expects an array of strings"),
+            ("style = \"buttons\"\norientation = \"diagonal\"\nspacing = 4", "`orientation`"),
+            ("style = \"buttons\"\nspacing = \"wide\"", "`spacing` expects an integer"),
+            ("style = \"dropdown\"\nusers = []", "no user to pick from"),
+        ] {
+            let parsed = node(props);
+            let (choice, unusable) = choose(&parsed, "", local);
+            assert_eq!(choice, Choice::Entry, "{props}");
+            let why = unusable.map(|why| why.to_string()).unwrap_or_default();
+            assert!(why.contains(fragment), "{props}: {why}");
+            let unconsumed = parsed.props.unconsumed();
+            assert!(unconsumed.is_empty(), "{props}: {unconsumed:?}");
+        }
+    }
 
     #[test]
     fn a_name_not_offered_selects_nothing() {
