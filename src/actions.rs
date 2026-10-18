@@ -2,10 +2,11 @@ use gtk4 as gtk;
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::config::{Commands, Config, Texts};
@@ -33,6 +34,35 @@ impl Runs {
     fn repeat(&self, argv: &[String], now: Instant) -> bool {
         let last = self.0.borrow_mut().insert(argv.to_vec(), now);
         last.is_some_and(|last| now.saturating_duration_since(last) < REPEAT_WITHIN)
+    }
+}
+
+/// Autorepeat presses of a held key come closer together than this; a key
+/// still down after a longer pause had its release go elsewhere (an open
+/// list, another program).
+const HELD_GAP: Duration = Duration::from_secs(2);
+
+/// The keys that are down. Autorepeat sends more presses of a held key with
+/// no release between, and GDK does not mark them.
+#[derive(Default)]
+struct Held {
+    keys: RefCell<HashMap<u32, Instant>>,
+    repeat: Cell<bool>,
+}
+
+impl Held {
+    fn press(&self, keycode: u32, now: Instant) {
+        let last = self.keys.borrow_mut().insert(keycode, now);
+        self.repeat.set(last.is_some_and(|last| now.saturating_duration_since(last) < HELD_GAP));
+    }
+
+    fn release(&self, keycode: u32) {
+        self.keys.borrow_mut().remove(&keycode);
+    }
+
+    /// Whether the press being handled is a repeat.
+    fn repeating(&self) -> bool {
+        self.repeat.get()
     }
 }
 
@@ -73,6 +103,12 @@ impl Action {
             Action::Focus(target) => app.emit(&UiEvent::Focus(*target)),
             Action::Run(argv) => run(app, demo, texts, argv),
         }
+    }
+
+    /// Whether a held key does it again: it keeps stepping through the
+    /// sessions, but runs a command once.
+    fn repeats(&self) -> bool {
+        !matches!(self, Action::Run(_))
     }
 }
 
@@ -124,14 +160,27 @@ fn report(app: &AppHandle, template: &str, argv: &[String], why: &str) {
     app.emit(&UiEvent::PamError(text));
 }
 
-/// The `[keys]` table on the window. Capture phase: a bound key works
+/// The `[keys]` table, as controllers to add to the window in this order:
+/// GTK runs the one added last first, and the key watcher has to see every
+/// press before a shortcut takes it. Capture phase: a bound key works
 /// whatever has the focus, before an entry can take it as input.
 pub fn shortcuts(
     config: &Config,
     app: &AppHandle,
     demo: bool,
     problems: &mut Vec<String>,
-) -> gtk::ShortcutController {
+) -> [gtk::EventController; 2] {
+    let held = Rc::new(Held::default());
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let down = held.clone();
+    keys.connect_key_pressed(move |_, _, keycode, _| {
+        down.press(keycode, Instant::now());
+        glib::Propagation::Proceed
+    });
+    let up = held.clone();
+    keys.connect_key_released(move |_, _, keycode, _| up.release(keycode));
+
     let controller = gtk::ShortcutController::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     let (bindings, found) = bind(&config.keys, &config.commands, |key| {
@@ -147,14 +196,16 @@ pub fn shortcuts(
         problems.push(problem);
     }
     for (trigger, action) in bindings {
-        let (app, texts) = (app.clone(), config.texts.clone());
+        let (app, texts, held) = (app.clone(), config.texts.clone(), held.clone());
         let callback = gtk::CallbackAction::new(move |_, _| {
-            action.perform(&app, demo, &texts);
+            if action.repeats() || !held.repeating() {
+                action.perform(&app, demo, &texts);
+            }
             glib::Propagation::Stop
         });
         controller.add_shortcut(gtk::Shortcut::new(Some(trigger), Some(callback)));
     }
-    controller
+    [controller.upcast(), keys.upcast()]
 }
 
 /// A key spelt twice (`<Ctrl>r`, `<Control>r`) keeps the first.
@@ -313,6 +364,34 @@ mod tests {
         assert!(runs.repeat(&reboot, after(2100)), "counted from the last run, not the first");
         assert!(!runs.repeat(&reboot, after(4100)));
         assert!(runs.repeat(&poweroff, after(2199)));
+    }
+
+    #[test]
+    fn a_press_of_a_key_still_down_is_a_repeat() {
+        let (delete, shift) = (119, 50);
+        let held = Held::default();
+        let start = Instant::now();
+        let press = |keycode: u32, ms: u64| {
+            held.press(keycode, start + Duration::from_millis(ms));
+            held.repeating()
+        };
+        assert!(!press(delete, 0));
+        assert!(press(delete, 600), "the first autorepeat");
+        assert!(press(delete, 640));
+        assert!(!press(shift, 650));
+        assert!(press(delete, 680), "a held key keeps repeating past another press");
+        held.release(delete);
+        assert!(!press(delete, 900), "pressed again");
+        assert!(!press(delete, 3000), "its release went elsewhere");
+    }
+
+    #[test]
+    fn a_held_key_steps_sessions_but_runs_a_command_once() {
+        assert!(Action::NextSession.repeats());
+        assert!(Action::PrevSession.repeats());
+        assert!(Action::Cancel.repeats());
+        assert!(Action::Focus(FocusTarget::Password).repeats());
+        assert!(!Action::Run(argv(&["systemctl", "reboot"])).repeats());
     }
 
     #[test]

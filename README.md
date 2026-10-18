@@ -84,7 +84,9 @@ A key an entry takes as input (a character, Enter, Tab, Backspace, Delete,
 Escape — on the keypad too) needs `<Control>`, `<Alt>` or `<Super>`. Such a
 key, one GTK cannot read, an unknown action and a key bound twice
 (`<Ctrl>r`, `<Control>r`: the first wins) are named in the banner.
-`--demo` announces a command instead of running it.
+A key acts at once (keys have no `confirm`); held down, it runs its command
+once, while `next-session` and `prev-session` keep stepping. `--demo`
+announces a command instead of running it.
 
 **Rewriting texts.** Every text shown — PAM's info and error messages,
 prompts, the failure after a wrong password, the greeter's own — passes

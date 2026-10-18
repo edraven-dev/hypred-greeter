@@ -219,7 +219,9 @@ fn main() {
         window.add_controller(activity);
         // After the activity watcher: a bound key stops the event, and it
         // still counts as input.
-        window.add_controller(shortcuts);
+        for controller in shortcuts {
+            window.add_controller(controller);
+        }
         handle.auth.start_eager(&handle.username());
     });
 

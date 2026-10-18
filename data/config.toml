@@ -60,7 +60,7 @@ poweroff = ["systemctl", "poweroff"]
 # next-session, prev-session, focus-username, focus-password, or a
 # [commands] name. Works whatever has the focus; a key an entry takes as
 # input (a character, Enter, Tab, Backspace, Delete, Escape) needs
-# <Control>, <Alt> or <Super>.
+# <Control>, <Alt> or <Super>. Held down, a key runs its command once.
 # "<Control><Alt>Delete" = "reboot"
 # F2 = "next-session"
 
