@@ -110,10 +110,13 @@ fn entry(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
         ctx.problem(format!("{} (username): {skipped}", node.path));
     }
 
-    let app = ctx.app.clone();
+    // GTK's set_text deletes, then inserts: two `changed`, the first one
+    // empty, which this entry must not take for an edit of its own.
+    let following = Rc::new(Cell::new(false));
+    let (app, own) = (ctx.app.clone(), following.clone());
     entry.connect_changed(move |entry| {
         let text = entry.text();
-        if text.as_str() != app.username() {
+        if !own.get() && text.as_str() != app.username() {
             app.set_username(&text);
             app.username_edited();
         }
@@ -132,7 +135,9 @@ fn entry(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
         match event {
             UiEvent::UsernameChanged(name) => {
                 if entry.text().as_str() != name {
+                    following.set(true);
                     entry.set_text(name);
+                    following.set(false);
                 }
             }
             UiEvent::Focus(_)
