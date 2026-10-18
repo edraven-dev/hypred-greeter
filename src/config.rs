@@ -78,17 +78,12 @@ pub struct Gtk {
 pub struct Auth {
     pub eager: bool,
     pub rearm_window: Rearm,
-    /// The username shown when nothing is remembered.
     pub user: Option<String>,
     pub fixed_user: bool,
     /// Seconds text left in the password entry keeps a parked prompt ready
     /// after the last input — a stray key must not switch the reader off.
     pub typing_hold: u64,
-    /// How long the username entry has to settle before an eager
-    /// conversation opens for the name typed.
     pub username_debounce_ms: u64,
-    /// Misses within `fingerprint_cooldown` seconds that start a cool-down
-    /// that long; 0 in either: no cap.
     pub fingerprint_misses: u32,
     pub fingerprint_cooldown: u64,
 }
@@ -162,7 +157,6 @@ impl<'de> Deserialize<'de> for Rearm {
     }
 }
 
-/// Name → argv, for `button` actions and the power buttons.
 #[derive(Debug)]
 pub struct Commands(pub HashMap<String, Vec<String>>);
 
@@ -226,17 +220,11 @@ impl<'de> Deserialize<'de> for Keys {
 pub struct Sessions {
     pub x11_prefix: Vec<String>,
     pub env: Vec<String>,
-    /// Session id ("wayland/hyprland-uwsm") preselected for a user with
-    /// nothing remembered; else the first by name.
     pub default: Option<String>,
-    /// Ids: `only` keeps just these, `hide` drops these, `order` lists
-    /// these first (the rest follow by name).
     pub only: Vec<String>,
     pub hide: Vec<String>,
     pub order: Vec<String>,
-    /// Appended to the display name of X11 sessions.
     pub x11_suffix: String,
-    /// Id → display name (`[sessions.names]`).
     pub names: HashMap<String, String>,
 }
 
@@ -260,9 +248,7 @@ impl Default for Sessions {
 pub struct Texts {
     pub enter_username: String,
     pub username_changed: String,
-    /// When greetd's error description is empty.
     pub auth_failed: String,
-    /// `{program}` and `{error}` are filled in.
     pub power_failed: String,
     pub fingerprint_locked: String,
     pub rewrite: Vec<Rewrite>,
@@ -294,7 +280,6 @@ pub struct Rewrite {
     pub text: String,
     #[serde(default)]
     pub kind: Option<TextKind>,
-    /// Compiled once, on first use.
     #[serde(skip)]
     compiled: std::cell::OnceCell<Result<glib::Regex, String>>,
 }
@@ -346,7 +331,6 @@ impl Texts {
 }
 
 impl Rewrite {
-    /// A `regex = true` rule's pattern; `None` for a substring rule.
     fn compiled(&self) -> Option<Result<&glib::Regex, &str>> {
         if !self.regex {
             return None;
@@ -361,8 +345,6 @@ impl Rewrite {
         Some(compiled.as_ref().map_err(String::as_str))
     }
 
-    /// `Some` when the rule matches; a regex rule expands `\1` references
-    /// in `text`.
     fn apply(&self, text: &str) -> Option<String> {
         let Some(regex) = self.compiled() else {
             return text.contains(&self.pattern).then(|| self.text.clone());

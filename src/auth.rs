@@ -77,11 +77,9 @@ async fn sleep(total: Duration, piece: Duration) {
 pub type ResolveStart = Box<dyn Fn(&str) -> (Vec<String>, Vec<String>)>;
 
 pub struct Hooks {
-    /// The name in the username entry.
     pub current_username: Box<dyn Fn() -> String>,
     pub resolve_start: ResolveStart,
     pub on_started: Box<dyn Fn()>,
-    /// Whether this greeter's VT is the one on screen.
     pub seat_active: Box<dyn Fn() -> bool>,
 }
 
@@ -133,9 +131,7 @@ pub struct Auth {
     typing_hold: Cell<Duration>,
     seat_poll: Cell<Duration>,
     seat_waiting: Cell<bool>,
-    /// `fingerprint-misses`; zero, or a zero cool-down: no cap.
     miss_cap: u32,
-    /// How long a miss is remembered and a cool-down lasts.
     cooldown: Cell<Duration>,
     /// When the misses still remembered came, oldest first.
     misses: RefCell<VecDeque<Instant>>,
@@ -787,7 +783,6 @@ impl Auth {
         self.cooling.get() || self.waiting_out.get()
     }
 
-    /// The gate opened again: what it held goes on as it would have.
     fn release(&self) {
         if !self.eager || self.held() {
             return;
@@ -1005,12 +1000,10 @@ mod tests {
         static ON_SCREEN: Cell<bool> = const { Cell::new(true) };
     }
 
-    /// Whether the greeter's VT is the one on screen.
     fn on_screen(active: bool) {
         ON_SCREEN.with(|seat| seat.set(active));
     }
 
-    /// What the username entry shows.
     fn show(name: &str) {
         SHOWN.with(|shown| *shown.borrow_mut() = name.into());
     }

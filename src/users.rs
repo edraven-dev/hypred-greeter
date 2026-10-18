@@ -16,8 +16,6 @@ pub fn discover() -> Vec<String> {
     local_users(&read("/etc/passwd"), &read("/etc/login.defs"), &read("/etc/shells"))
 }
 
-/// The accounts useradd makes for people: a UID in login.defs' range and a
-/// login shell from /etc/shells.
 fn local_users(passwd: &str, login_defs: &str, shells: &str) -> Vec<String> {
     let (min, max) = uid_range(login_defs);
     let shells: HashSet<&str> = lines(shells).collect();

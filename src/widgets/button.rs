@@ -11,7 +11,6 @@ use crate::layout::Node;
 use crate::ui::ctx::BuildCtx;
 use crate::widgets::{image, WidgetDef, WidgetError};
 
-/// A `confirm` button stays armed this long.
 const CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 
 pub struct ButtonDef;

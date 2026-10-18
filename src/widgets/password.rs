@@ -164,7 +164,6 @@ fn placeholder_after(event: &UiEvent) -> Option<Option<&str>> {
     }
 }
 
-/// One `step` of `mask` on the entry's GtkText.
 fn mask_step(
     entry: &gtk::PasswordEntry,
     mask: &Cell<Mask>,

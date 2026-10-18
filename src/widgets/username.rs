@@ -49,8 +49,6 @@ impl WidgetDef for UsernameDef {
     }
 }
 
-/// What `node` becomes: a picker it cannot build is an entry, with the
-/// reason.
 fn choose(
     node: &Node,
     shown: &str,
@@ -231,7 +229,6 @@ fn dropdown(ctx: &BuildCtx, names: Vec<String>) -> gtk::Widget {
     dropdown.upcast()
 }
 
-/// Linked toggle buttons, the selected one `:checked`.
 fn buttons(
     ctx: &BuildCtx,
     names: Vec<String>,

@@ -28,7 +28,6 @@ const AVATAR_MAX_SIDE: u32 = 4096;
 /// encoders write a few dozen at most.
 const JPEG_MAX_SCANS: usize = 100;
 
-/// A theme icon by name, or an image file by absolute path.
 pub fn load_icon(value: &str) -> Result<gtk::Image, WidgetError> {
     let image = if value.starts_with('/') {
         gtk::Image::from_paintable(Some(&paintable(Path::new(value), ICON_SIZE)?))

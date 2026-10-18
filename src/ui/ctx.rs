@@ -90,8 +90,6 @@ impl AppHandle {
         }
     }
 
-    /// A picker's choice: like Enter in the username entry, minus the wait
-    /// for typing to settle.
     pub fn pick_user(&self, name: &str) {
         if name == self.username() {
             return;
@@ -101,7 +99,6 @@ impl AppHandle {
         self.auth.start_eager(name);
     }
 
-    /// The selected session's display name; empty without sessions.
     pub fn session_name(&self) -> String {
         self.shared.selected().map(|s| s.name.clone()).unwrap_or_default()
     }
@@ -113,7 +110,6 @@ impl AppHandle {
         }
     }
 
-    /// The next (+1) or previous (-1) session, wrapping around.
     pub fn step_session(&self, step: isize) {
         let count = self.shared.sessions.len();
         if count > 0 {
@@ -175,10 +171,8 @@ pub struct BuildCtx<'a> {
     pub bus: Rc<Bus>,
     pub app: AppHandle,
     pub demo: bool,
-    /// Built for --check, never shown: nothing is run.
     pub check: bool,
     problems: RefCell<Vec<String>>,
-    /// Kinds that built without falling back to the ⚠ placeholder.
     built: RefCell<std::collections::HashSet<String>>,
 }
 

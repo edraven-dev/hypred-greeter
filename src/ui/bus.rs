@@ -20,15 +20,11 @@ pub enum UiEvent {
     AuthError(String),
     Busy(bool),
     SessionChanged(usize),
-    /// A passive (eager) conversation is open and nothing was submitted.
     Armed(bool),
-    /// A fingerprint cool-down after too many misses: the greeter stops
-    /// arming the reader on its own and refuses a login without a password.
     FingerprintLocked(bool),
-    /// The session is being started (after auth success).
     Starting,
     Focus(FocusTarget),
-    /// The username entry's text; also emitted once at startup.
+    /// The username shown; also emitted once at startup.
     UsernameChanged(String),
 }
 

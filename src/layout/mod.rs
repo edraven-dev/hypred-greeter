@@ -39,8 +39,6 @@ pub fn load(path: &Path, require_auth: bool, known_user: bool) -> Loaded {
     Loaded { root, problems }
 }
 
-/// The built-in layout, also the fallback for one that makes login
-/// impossible.
 pub fn builtin() -> Node {
     let mut problems = Vec::new();
     let root = parse_str(DEFAULT_LAYOUT, &mut problems)
@@ -226,7 +224,6 @@ pub fn contains_kind(node: &Node, kind: &str) -> bool {
     any(node, &|node| node.kind == kind)
 }
 
-/// Some widget asked for the initial focus with `focus = true`.
 pub fn requests_focus(node: &Node) -> bool {
     any(node, &|node| node.common.focus == Some(true))
 }

@@ -6,8 +6,6 @@ use crate::layout::{Node, Props};
 use crate::ui::ctx::BuildCtx;
 use crate::widgets::{containers, WidgetDef, WidgetError};
 
-/// Sugar: a box of two `button`s, `#hg-power-reboot` and
-/// `#hg-power-poweroff`, running the `reboot` and `poweroff` commands.
 pub struct PowerDef;
 
 impl WidgetDef for PowerDef {

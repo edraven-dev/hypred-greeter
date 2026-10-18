@@ -23,7 +23,6 @@ const MEDIA_FEATURES: [(&str, &str); 3] = [
     ("gtk-interface-contrast", "prefers-contrast"),
     ("gtk-interface-reduced-motion", "prefers-reduced-motion"),
 ];
-/// Past this many CSS problems the banner only counts the rest.
 const CSS_PROBLEM_LINES: usize = 5;
 /// `.hg-failed` stays at least this long: the next input re-arms the reader
 /// and pam_fprintd's next "Place your finger" follows a mismatch within one
@@ -159,7 +158,6 @@ fn capped(mut lines: Vec<String>, limit: usize) -> Vec<String> {
     lines
 }
 
-/// Window state classes: any descendant can react (`.hg-failed #card {…}`).
 pub fn track_states(window: &gtk::ApplicationWindow, app: &AppHandle) {
     let failed = Rc::new(Failed::default());
     let (weak, clearing) = (window.downgrade(), failed.clone());

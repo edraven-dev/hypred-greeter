@@ -52,7 +52,6 @@ fn dropdown(ctx: &BuildCtx, names: &[String], selected: usize) -> Result<gtk::Wi
     Ok(dropdown.upcast())
 }
 
-/// Linked toggle buttons, the selected one `:checked`.
 fn buttons(
     ctx: &BuildCtx,
     node: &Node,
@@ -91,7 +90,6 @@ fn buttons(
     Ok(row.upcast())
 }
 
-/// One button showing the selection; a click moves on to the next.
 fn cycle(ctx: &BuildCtx, names: Vec<String>, selected: usize) -> Result<gtk::Widget, WidgetError> {
     let button = gtk::Button::with_label(&names[selected]);
     let app = ctx.app.clone();

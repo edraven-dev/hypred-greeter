@@ -28,8 +28,6 @@ pub struct Args {
 }
 
 impl Args {
-    /// Neither --demo nor --check: greetd is talked to, the state file
-    /// written.
     pub fn greetd(&self) -> bool {
         !self.demo && !self.check
     }

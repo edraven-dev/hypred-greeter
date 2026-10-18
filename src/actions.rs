@@ -25,12 +25,10 @@ const REPORT_WITHIN: Duration = Duration::from_secs(10);
 /// the first is under way.
 const REPEAT_WITHIN: Duration = Duration::from_secs(2);
 
-/// When each command last started.
 #[derive(Default)]
 pub struct Runs(RefCell<HashMap<Vec<String>, Instant>>);
 
 impl Runs {
-    /// Notes `argv` starting at `now`; true when that repeats its last run.
     fn repeat(&self, argv: &[String], now: Instant) -> bool {
         let last = self.0.borrow_mut().insert(argv.to_vec(), now);
         last.is_some_and(|last| now.saturating_duration_since(last) < REPEAT_WITHIN)
@@ -60,7 +58,6 @@ impl Held {
         self.keys.borrow_mut().remove(&keycode);
     }
 
-    /// Whether the press being handled is a repeat.
     fn repeating(&self) -> bool {
         self.repeat.get()
     }
@@ -105,14 +102,11 @@ impl Action {
         }
     }
 
-    /// Whether a held key does it again: it keeps stepping through the
-    /// sessions, but runs a command once.
     fn repeats(&self) -> bool {
         !matches!(self, Action::Run(_))
     }
 }
 
-/// The one place a configured command is started from.
 fn run(app: &AppHandle, demo: bool, texts: &Texts, argv: &[String]) {
     let Some((program, args)) = argv.split_first() else { return };
     if demo {

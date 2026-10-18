@@ -178,8 +178,6 @@ impl Live {
         label.set_label(&text);
     }
 
-    /// A command's output replaces the template; placeholders apply to
-    /// it too.
     fn set_source(self: &Rc<Self>, text: &str) {
         *self.template.borrow_mut() = Template::parse_lenient(text);
         self.data.set(true);
@@ -187,7 +185,6 @@ impl Live {
         self.tick();
     }
 
-    /// One ticker per label, started once a `{time:…}` is on show.
     fn tick(self: &Rc<Self>) {
         if self.ticking.get() || self.template.borrow().time_formats().next().is_none() {
             return;
@@ -204,8 +201,6 @@ impl Live {
     }
 }
 
-/// Runs `argv` on a thread of its own — once, or every `interval`
-/// seconds — and hands over each successful run's trimmed stdout.
 fn run_command(argv: Vec<String>, interval: u64) -> async_channel::Receiver<String> {
     let (tx, rx) = async_channel::unbounded();
     std::thread::spawn(move || {
