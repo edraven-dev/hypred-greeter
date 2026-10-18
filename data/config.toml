@@ -87,8 +87,8 @@ enter-username = "enter a username"
 username-changed = "username changed — enter the password again"
 auth-failed = "authentication failed"
 power-failed = "{program}: {error}"
-# When a fingerprint cool-down starts ([auth] fingerprint-misses), and for a
-# login refused during one.
+# Shown during a fingerprint cool-down ([auth] fingerprint-misses), and for
+# a login refused in one.
 fingerprint-locked = "too many fingerprint attempts — use your password"
 # Rewrite rules for everything shown — PAM info and errors, prompts,
 # failures: the first rule whose `match` is found in the text (a
