@@ -9,7 +9,9 @@ usage: hypred-greeter [options]
                     (a relative --layout/--style is taken from the current
                     directory, a relative [paths] value from the config's)
   --demo            windowed demo mode: fake auth; power, button and [keys]
-                    commands are announced, not run (label commands do run)
+                    commands are announced, not run (label commands do run);
+                    a layout that allows no login is shown as it is, where
+                    --check and the login screen use the built-in one
   --check           load config, style and layout as a first start under
                     greetd would (no remembered user) and build the widgets
                     (no window, no greetd, no label commands); print every

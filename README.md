@@ -16,6 +16,8 @@ recompile.
   Login always works.
 - **Demo mode**: `hypred-greeter --demo` runs windowed in your session with
   fake auth — iterate on layout and CSS without ever leaving your desktop.
+  It shows a layout as it is, even one that leaves no way to log in;
+  `--check` judges a layout the way the login screen does.
 
 ## Install
 
@@ -390,10 +392,12 @@ possible later without breaking existing widgets.
   `NoDisplay=true` copy there hides the later ones, as XDG has it. What
   `[sessions] only`/`hide`/`order`/`names` make of the list is what every
   picker, `{session}` placeholder and the remembered-session lookup see.
-- **A layout without a `username` widget** is accepted only when a
-  username resolves (remembered, or `[auth] user`); otherwise the built-in
-  layout takes over, with a banner line saying why — like a layout without
-  a `password` widget.
+- **A layout must allow a login.** One without a `password` widget, or
+  whose `password` widget fails to build (a bad property), is replaced by
+  the built-in layout, with a banner line saying why; so is one without a
+  `username` widget, unless a username resolves (remembered, or
+  `[auth] user`). `--demo` skips this guard and shows the layout as it
+  is; `--check` applies it, as the login screen does.
 - **Exit codes** (the process always exits — a wedged greeter is a dark
   screen): `0` session handed to greetd, `1` startup failure, `2` greetd
   transport failure, `101` panic; with `--check`, `0` nothing to report and
