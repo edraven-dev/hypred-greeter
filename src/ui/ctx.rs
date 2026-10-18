@@ -164,6 +164,28 @@ impl AppHandle {
     }
 }
 
+/// How each `username` widget built takes the focus. A focus request goes
+/// to the first entry that takes it, else the first picker: each grabbing
+/// it would leave it with the one built last.
+#[derive(Default)]
+pub struct UsernameFocus(RefCell<Vec<(bool, Grab)>>);
+
+/// Grabs the focus for its widget; false where that widget cannot take it.
+type Grab = Box<dyn Fn() -> bool>;
+
+impl UsernameFocus {
+    pub fn add(&self, entry: bool, grab: impl Fn() -> bool + 'static) {
+        self.0.borrow_mut().push((entry, Box::new(grab)));
+    }
+
+    fn grab(&self) -> bool {
+        let takers = self.0.borrow();
+        let entries = takers.iter().filter(|(entry, _)| *entry);
+        let pickers = takers.iter().filter(|(entry, _)| !*entry);
+        entries.chain(pickers).any(|(_, grab)| grab())
+    }
+}
+
 pub struct BuildCtx<'a> {
     pub config: &'a Config,
     pub base_dir: &'a std::path::Path,
@@ -172,6 +194,7 @@ pub struct BuildCtx<'a> {
     pub app: AppHandle,
     pub demo: bool,
     pub check: bool,
+    pub username_focus: Rc<UsernameFocus>,
     problems: RefCell<Vec<String>>,
     built: RefCell<std::collections::HashSet<String>>,
 }
@@ -186,6 +209,24 @@ impl<'a> BuildCtx<'a> {
         check: bool,
     ) -> Self {
         let bus = app.bus.clone();
+        let username_focus = Rc::new(UsernameFocus::default());
+        let takers = username_focus.clone();
+        bus.subscribe(move |event| match event {
+            UiEvent::Focus(FocusTarget::Username) => {
+                takers.grab();
+            }
+            UiEvent::Focus(FocusTarget::Password)
+            | UiEvent::Prompt { .. }
+            | UiEvent::Info(_)
+            | UiEvent::PamError(_)
+            | UiEvent::AuthError(_)
+            | UiEvent::Busy(_)
+            | UiEvent::SessionChanged(_)
+            | UiEvent::Armed(_)
+            | UiEvent::FingerprintLocked(_)
+            | UiEvent::Starting
+            | UiEvent::UsernameChanged(_) => {}
+        });
         let problems = RefCell::new(Vec::new());
         Self {
             config,
@@ -195,6 +236,7 @@ impl<'a> BuildCtx<'a> {
             app,
             demo,
             check,
+            username_focus,
             problems,
             built: RefCell::default(),
         }
@@ -385,6 +427,36 @@ pub(crate) mod tests {
             app.set_username("bob");
         });
         assert_eq!(log, ["username bo", "username bob", "session 1"]);
+    }
+
+    #[test]
+    fn the_username_focus_goes_to_one_widget_an_entry_first() {
+        let tried = Rc::new(RefCell::new(Vec::new()));
+        let focus = |takers: &[(&'static str, bool, bool)]| {
+            tried.borrow_mut().clear();
+            let order = UsernameFocus::default();
+            for &(name, entry, takes) in takers {
+                let tried = tried.clone();
+                order.add(entry, move || {
+                    tried.borrow_mut().push(name);
+                    takes
+                });
+            }
+            (order.grab(), tried.borrow().clone())
+        };
+        let (dropdown, buttons) = (("dropdown", false, true), ("buttons", false, true));
+        let (entry, unrooted) = (("entry", true, true), ("unrooted entry", true, false));
+        assert_eq!(
+            focus(&[dropdown, unrooted, entry, buttons]),
+            (true, vec!["unrooted entry", "entry"])
+        );
+        assert_eq!(focus(&[entry, dropdown]), (true, vec!["entry"]));
+        assert_eq!(
+            focus(&[unrooted, buttons, dropdown]),
+            (true, vec!["unrooted entry", "buttons"])
+        );
+        assert_eq!(focus(&[unrooted]), (false, vec!["unrooted entry"]));
+        assert_eq!(focus(&[]), (false, vec![]));
     }
 
     #[test]

@@ -125,18 +125,17 @@ fn entry(ctx: &BuildCtx, node: &Node) -> gtk::Widget {
     });
 
     let weak = entry.downgrade();
+    ctx.username_focus.add(true, move || weak.upgrade().is_some_and(|entry| entry.grab_focus()));
+    let weak = entry.downgrade();
     ctx.bus.subscribe(move |event| {
         let Some(entry) = weak.upgrade() else { return };
         match event {
-            UiEvent::Focus(FocusTarget::Username) => {
-                entry.grab_focus();
-            }
             UiEvent::UsernameChanged(name) => {
                 if entry.text().as_str() != name {
                     entry.set_text(name);
                 }
             }
-            UiEvent::Focus(FocusTarget::Password)
+            UiEvent::Focus(_)
             | UiEvent::Prompt { .. }
             | UiEvent::Info(_)
             | UiEvent::PamError(_)
@@ -207,14 +206,13 @@ fn dropdown(ctx: &BuildCtx, names: Vec<String>) -> gtk::Widget {
     });
 
     let weak = dropdown.downgrade();
+    ctx.username_focus.add(false, move || weak.upgrade().is_some_and(|it| it.grab_focus()));
+    let weak = dropdown.downgrade();
     ctx.bus.subscribe(move |event| {
         let Some(dropdown) = weak.upgrade() else { return };
         match event {
             UiEvent::UsernameChanged(name) => rows.show(&dropdown, name),
-            UiEvent::Focus(FocusTarget::Username) => {
-                dropdown.grab_focus();
-            }
-            UiEvent::Focus(FocusTarget::Password)
+            UiEvent::Focus(_)
             | UiEvent::Prompt { .. }
             | UiEvent::Info(_)
             | UiEvent::PamError(_)
@@ -255,6 +253,12 @@ fn buttons(
     }
 
     let weak: Vec<_> = items.iter().map(|item| item.downgrade()).collect();
+    let focusing = weak.clone();
+    ctx.username_focus.add(false, move || {
+        let items: Vec<gtk::ToggleButton> = focusing.iter().filter_map(|i| i.upgrade()).collect();
+        let item = items.iter().find(|item| item.is_active()).or(items.first());
+        item.is_some_and(|item| item.grab_focus())
+    });
     ctx.bus.subscribe(move |event| match event {
         UiEvent::UsernameChanged(name) => {
             let chosen = position(&names, name);
@@ -264,13 +268,7 @@ fn buttons(
                 }
             }
         }
-        UiEvent::Focus(FocusTarget::Username) => {
-            let items: Vec<gtk::ToggleButton> = weak.iter().filter_map(|i| i.upgrade()).collect();
-            if let Some(item) = items.iter().find(|item| item.is_active()).or(items.first()) {
-                item.grab_focus();
-            }
-        }
-        UiEvent::Focus(FocusTarget::Password)
+        UiEvent::Focus(_)
         | UiEvent::Prompt { .. }
         | UiEvent::Info(_)
         | UiEvent::PamError(_)
