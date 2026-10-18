@@ -238,6 +238,14 @@ pub(crate) mod tests {
     /// Runs `scenario` with a handle over `shared` and returns the events
     /// it caused, on a context of its own like the auth tests.
     pub(crate) fn events(shared: Rc<Shared>, scenario: impl FnOnce(&AppHandle)) -> Vec<String> {
+        events_with(shared, &crate::config::Auth::default(), scenario)
+    }
+
+    fn events_with(
+        shared: Rc<Shared>,
+        options: &crate::config::Auth,
+        scenario: impl FnOnce(&AppHandle),
+    ) -> Vec<String> {
         let context = glib::MainContext::new();
         let log = Rc::new(RefCell::new(Vec::new()));
         let acquired = context.with_thread_default(|| {
@@ -254,7 +262,7 @@ pub(crate) mod tests {
                 Box::new(crate::backend::DemoBackend::new()),
                 bus.clone(),
                 true,
-                &crate::config::Auth::default(),
+                options,
                 &crate::config::Texts::default(),
                 crate::auth::Hooks {
                     current_username: Box::new(String::new),
@@ -296,6 +304,35 @@ pub(crate) mod tests {
             assert_eq!(app.username(), "touch");
         });
         assert_eq!(log, ["username touch", "session 1", "Focus(Password)"]);
+    }
+
+    #[test]
+    fn a_pick_opens_an_eager_conversation_for_the_name_picked() {
+        let shared = Shared::new("fprint".into(), sessions(), State::default(), None);
+        let eager = crate::config::Auth { eager: true, ..Default::default() };
+        let log = events_with(shared, &eager, |app| {
+            app.pick_user("fprint");
+            app.pick_user("touch");
+            let asked = Rc::new(Cell::new(false));
+            let flag = asked.clone();
+            app.bus
+                .subscribe(move |event| flag.set(flag.get() || matches!(event, UiEvent::Info(_))));
+            let context = glib::MainContext::ref_thread_default();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !asked.get() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+                while context.iteration(false) {}
+            }
+        });
+        assert_eq!(
+            log,
+            [
+                "username touch",
+                "Focus(Password)",
+                "Armed(true)",
+                "Info(\"Place your right thumb on the fingerprint reader\")",
+            ]
+        );
     }
 
     #[test]
