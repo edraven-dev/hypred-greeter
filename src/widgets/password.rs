@@ -26,12 +26,16 @@ impl WidgetDef for PasswordDef {
         let placeholder = node.props.str_or("placeholder", "password")?;
         let prompt_placeholder = node.props.bool("prompt-placeholder")?.unwrap_or(false);
         let mask_visible = node.props.bool("mask-visible")?.unwrap_or(true);
+        let mask_char = invisible_char(node)?;
         let entry = gtk::PasswordEntry::builder()
             .placeholder_text(placeholder.as_str())
             .show_peek_icon(node.props.bool("peek")?.unwrap_or(true))
             .activates_default(false)
             .build();
         apply_entry_props(&entry, node)?;
+        if let (Some(mask_char), Some(text)) = (mask_char, text_of(&entry)) {
+            text.set_invisible_char(mask_char);
+        }
 
         let app = ctx.app.clone();
         entry.connect_changed(move |entry| app.auth.set_typing(!entry.text().is_empty()));
@@ -131,6 +135,17 @@ fn text_of(entry: &gtk::PasswordEntry) -> Option<gtk::Text> {
     entry.delegate().and_downcast()
 }
 
+/// The one character the mask shows; unset, GTK picks one the font has.
+/// No CSS property reaches it.
+fn invisible_char(node: &Node) -> Result<Option<char>, WidgetError> {
+    let Some(value) = node.props.str("invisible-char")? else { return Ok(None) };
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(only), None) => Ok(Some(only)),
+        _ => Err(WidgetError::Other("`invisible-char` must be exactly one character".into())),
+    }
+}
+
 /// With `mask-visible = false`: whether the entry shows its text in clear
 /// after `event`, `unmasked` saying a visible prompt made it do so; `None`
 /// leaves it as it is. The answer to a visible prompt is shown until that
@@ -156,6 +171,25 @@ fn in_clear(event: &UiEvent, unmasked: bool) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn node(props: &str) -> Node {
+        let text = format!("[root]\nwidget = \"password\"\n{props}\n");
+        crate::layout::parse_str(&text, &mut Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn the_mask_is_exactly_one_character() {
+        assert_eq!(invisible_char(&node("")).unwrap(), None);
+        assert_eq!(invisible_char(&node("invisible-char = \"*\"")).unwrap(), Some('*'));
+        assert_eq!(invisible_char(&node("invisible-char = \"✱\"")).unwrap(), Some('✱'));
+        assert_eq!(invisible_char(&node("invisible-char = \" \"")).unwrap(), Some(' '));
+        for bad in ["\"\"", "\"**\"", "\"e\\u0301\""] {
+            let err = invisible_char(&node(&format!("invisible-char = {bad}"))).unwrap_err();
+            assert!(err.to_string().contains("exactly one character"), "{bad}: {err}");
+        }
+        let err = invisible_char(&node("invisible-char = 42")).unwrap_err().to_string();
+        assert!(err.contains("expects a string"), "{err}");
+    }
 
     #[test]
     fn a_visible_prompts_answer_is_in_clear_until_the_prompt_ends() {
